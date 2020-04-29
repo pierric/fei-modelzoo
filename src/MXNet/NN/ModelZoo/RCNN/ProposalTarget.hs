@@ -6,11 +6,9 @@ import qualified Data.Vector.Unboxed.Mutable as UVM
 import qualified Data.Array.Repa as Repa
 import Data.Array.Repa (Array, U, D)
 import Data.Array.Repa.Index
-import Data.Array.Repa.Shape
-import Data.Array.Repa.Slice
 import Data.Random (shuffle, runRVar, StdRandom(..))
 import Data.Random.Vector (randomElement)
-import Control.Lens ((^.), makeLenses)
+import Control.Lens ((^.), (^?!), ix, makeLenses)
 import Control.Monad (replicateM, forM_, join)
 import Control.Exception.Base(assert)
 
@@ -63,6 +61,8 @@ instance CustomOperation (Operation ProposalTargetProp) where
 
         assert (batch_size == length r_gt) (return ())
 
+        -- sample rois for each example of the batch
+        -- and concatenate
         (rois, labels, bbox_targets, bbox_weights) <- V.unzip4 <$>
             V.mapM (sample_batch r_rois r_gt) (V.enumFromN (0 :: Int) batch_size)
 
@@ -75,10 +75,6 @@ instance CustomOperation (Operation ProposalTargetProp) where
             bbox_target_output_nd = NDArray bbox_target_output :: NDArray Float
             bbox_weight_output_nd = NDArray bbox_weight_output :: NDArray Float
             label_output_nd       = NDArray label_output       :: NDArray Float
-
-        ndsize rois_output_nd >>= \s -> assert (s == Repa.size (Repa.extent rois'))         (return ())
-        ndsize bbox_target_output_nd >>= \s -> assert (s == Repa.size (Repa.extent bbox_targets')) (return ())
-        ndsize bbox_weight_output_nd >>= \s -> assert (s == Repa.size (Repa.extent bbox_weights')) (return ())
 
         copyFromRepa rois_output_nd rois'
         copyFromRepa bbox_target_output_nd bbox_targets'
@@ -165,10 +161,8 @@ sample_rois rois gt prop = do
             tgt = targets %! i
         assert (lbl >= 0 && lbl < num_classes) (return ())
         let tgt_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_target
-        UVM.write tgt_dst 0 (tgt #! 0)
-        UVM.write tgt_dst 1 (tgt #! 1)
-        UVM.write tgt_dst 2 (tgt #! 2)
-        UVM.write tgt_dst 3 (tgt #! 3)
+        forM_ [0..3] $ \i ->
+            UVM.write tgt_dst i (tgt #! i)
         let wgh_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_weight
         UVM.set wgh_dst 1
 
@@ -202,8 +196,9 @@ overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
                         in areaI / areaU
 
 
-(%!) :: V.Vector a -> Int -> a
-(%!) = (V.!)
+a %! i = a ^?! ix i
+a #! i = a ^?! ixr (Repa.fromIndex (extent a) i)
+
 
 -- test_sample_rois = let
 --         v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]

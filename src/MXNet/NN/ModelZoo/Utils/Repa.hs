@@ -1,18 +1,28 @@
 {-# LANGUAGE ExplicitForAll #-}
+{-# LANGUAGE Rank2Types #-}
 module MXNet.NN.ModelZoo.Utils.Repa where
 
+import Control.Lens
 import Control.Exception.Base(throw, Exception)
 import Data.Array.Repa (Shape, Array, U, DIM1, DIM2, DIM3, All(..), Z(..), (:.)(..), extent, toUnboxed)
 import qualified Data.Array.Repa as Repa
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
-import Text.PrettyPrint.ANSI.Leijen (putDoc, Pretty(..), (<+>), text)
+import Text.PrettyPrint.ANSI.Leijen (Pretty(..), (<+>), text)
 
 instance (Pretty e, VU.Unbox e, Shape d) => Pretty (Array U d e) where
     pretty arr = text (Repa.showShape $ extent arr) <+> pretty (VU.toList $ toUnboxed arr)
 
-(#!) :: (Shape sh, VU.Unbox e) => Array U sh e -> Int -> e
-(#!) = Repa.linearIndex
+class IxedReadOnly m where
+    ixr :: Index m -> Fold m (IxValue m)
+
+type instance Index (Array u sh a) = sh
+type instance IxValue (Array u sh a) = a
+
+instance (Repa.Source u a, Shape sh) => IxedReadOnly (Array u sh a) where
+    ixr i f a
+        | not (Repa.inShapeRange Repa.zeroDim (extent a) i) = pure a
+        | otherwise = f (Repa.unsafeIndex a i) *> pure a
 
 expandDim :: (Shape sh, VU.Unbox e) => Int -> Array U sh e -> Array U (sh :. Int) e
 expandDim axis arr | axis >=0 && axis < rank = Repa.computeS $ Repa.reshape shape_new arr
