@@ -9,17 +9,17 @@ import MXNet.NN.ModelZoo.Utils.Repa
 type RBox = Array U DIM1 Float
 
 bboxArea :: RBox -> Float
-bboxArea box = (box #! 2 - box #! 0 + 1) * (box #! 3 - box #! 1 + 1)
+bboxArea box = (box ^#! 2 - box ^#! 0 + 1) * (box ^#! 3 - box ^#! 1 + 1)
 
 bboxIntersect :: RBox -> RBox -> Maybe RBox
 bboxIntersect box1 box2 | not valid = Nothing
                         | otherwise = Just $ Repa.fromListUnboxed (Z:.4) [x1, y1, x2, y2]
   where
     valid = x2 - x1 > 0 && y2 - y1 > 0
-    x1 = max (box1 #! 0) (box2 #! 0)
-    x2 = min (box1 #! 2) (box2 #! 2)
-    y1 = max (box1 #! 1) (box2 #! 1)
-    y2 = min (box1 #! 3) (box2 #! 3)
+    x1 = max (box1 ^#! 0) (box2 ^#! 0)
+    x2 = min (box1 ^#! 2) (box2 ^#! 2)
+    y1 = max (box1 ^#! 1) (box2 ^#! 1)
+    y2 = min (box1 ^#! 3) (box2 ^#! 3)
 
 bboxIOU :: RBox -> RBox -> Float
 bboxIOU box1 box2 = case bboxIntersect box1 box2 of

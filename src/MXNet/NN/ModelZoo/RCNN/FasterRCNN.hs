@@ -9,6 +9,7 @@ import Data.Array.Repa.Index
 import Data.Array.Repa.Shape
 import qualified Data.Array.Repa as Repa
 import Control.Monad.IO.Class (liftIO)
+import Control.Lens ((^?!), ix)
 import Text.Printf (printf)
 
 import MXNet.Base
@@ -368,7 +369,7 @@ instance EvalMetricMethod RCNNAccMetric where
             pairs_fg  = UV.filter ((>0) . fst) pairs_all
             equal_fg  = UV.filter (uncurry (==)) pairs_fg
 
-        print (UV.map (bimap floor floor) pairs_fg :: UV.Vector (Int, Int))
+        -- print (UV.map (bimap floor floor) pairs_fg :: UV.Vector (Int, Int))
 
         let ref_acc_all = _rcnn_acc_all rcnn_acc
             ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
@@ -416,13 +417,18 @@ instance EvalMetricMethod RPNLogLossMetric where
         -- mark out labels where value -1
         let mask = Repa.computeUnboxedS $ Repa.map (/= -1) label
 
-        pred  <- Repa.selectP (mask #!) (\i -> pred  Repa.! (Z :. i :. (floor $ label #! i))) size
-        label <- Repa.selectP (mask #!) (label #!) size
+        pred  <- Repa.selectP
+                    (mask ^#!)
+                    (\i -> let cls = floor (label ^#! i)
+                           in pred ^?! ixr (Z :. i :. cls))
+                    size
+        label <- Repa.selectP
+                    (mask ^#!)
+                    (label ^#!)
+                    size
 
         let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
-        cls_loss <- Repa.foldP (+) 0 pred_with_ep
-
-        let cls_loss_val = realToFrac (cls_loss #! 0)
+        cls_loss_val <- realToFrac <$> Repa.sumAllP pred_with_ep
         modifyIORef' sumRef (+ cls_loss_val)
         modifyIORef' cntRef (+ size)
 

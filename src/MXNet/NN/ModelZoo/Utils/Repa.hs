@@ -9,6 +9,7 @@ import qualified Data.Array.Repa as Repa
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import Text.PrettyPrint.ANSI.Leijen (Pretty(..), (<+>), text)
+import GHC.Stack (HasCallStack)
 
 instance (Pretty e, VU.Unbox e, Shape d) => Pretty (Array U d e) where
     pretty arr = text (Repa.showShape $ extent arr) <+> pretty (VU.toList $ toUnboxed arr)
@@ -23,6 +24,19 @@ instance (Repa.Source u a, Shape sh) => IxedReadOnly (Array u sh a) where
     ixr i f a
         | not (Repa.inShapeRange Repa.zeroDim (extent a) i) = pure a
         | otherwise = f (Repa.unsafeIndex a i) *> pure a
+
+newtype ArrayFlatten u sh a = ArrayFlatten {getArray :: Array u sh a}
+
+type instance Index (ArrayFlatten u sh a) = Int
+type instance IxValue (ArrayFlatten u sh a) = a
+
+(^#!) :: (Repa.Source u a, Shape sh, HasCallStack) => Array u sh a -> Int -> a
+a ^#! i = ArrayFlatten a ^?! ixr i
+
+instance (Repa.Source u a, Shape sh) => IxedReadOnly (ArrayFlatten u sh a) where
+    ixr i f aflt@(ArrayFlatten a)
+        | not (i >= 0 && i < Repa.size (extent a)) = pure aflt
+        | otherwise = f (Repa.unsafeLinearIndex a i) *> pure aflt
 
 expandDim :: (Shape sh, VU.Unbox e) => Int -> Array U sh e -> Array U (sh :. Int) e
 expandDim axis arr | axis >=0 && axis < rank = Repa.computeS $ Repa.reshape shape_new arr

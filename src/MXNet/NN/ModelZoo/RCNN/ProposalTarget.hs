@@ -11,6 +11,7 @@ import Data.Random.Vector (randomElement)
 import Control.Lens ((^.), (^?!), ix, makeLenses)
 import Control.Monad (replicateM, forM_, join)
 import Control.Exception.Base(assert)
+import GHC.Stack (HasCallStack)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
@@ -83,9 +84,9 @@ instance CustomOperation (Operation ProposalTargetProp) where
 
       where
         sample_batch r_rois r_gt index = do
-            let rois_this_image   = V.filter (\roi -> floor (roi #! 0) == index) r_rois
-                all_gt_this_image = vunstack $ r_gt %! index
-                gt_this_image     = V.filter (\gt  -> gt  #! 4 > 0) all_gt_this_image
+            let rois_this_image   = V.filter (\roi -> floor (roi ^#! 0) == index) r_rois
+                all_gt_this_image = vunstack $ r_gt ^%! index
+                gt_this_image     = V.filter (\gt  -> gt  ^#! 4 > 0) all_gt_this_image
 
             -- WHY?
             -- append gt boxes to rois
@@ -113,15 +114,12 @@ sample_rois rois gt prop = do
     -- :param gt: [num_rois, 5] (x1, y1, x2, y2, cls)
     --
     -- :returns: sampled (rois, labels, regression, weight)
-    -- let num_rois = V.length rois
-    -- print(num_rois, V.length gt_boxes)
-    -- assert (num_rois == V.length gt_boxes) (return ())
     let aoi_boxes = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois
         gt_boxes  = V.map (Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt
         overlaps  = Repa.computeUnboxedS $ overlapMatrix aoi_boxes gt_boxes
 
     let maxIndices = argMax overlaps
-        gt_chosen  = V.map (gt %!) maxIndices
+        gt_chosen  = V.map (gt ^%!) maxIndices
 
     -- a uniform sampling w/o replacement from the fg boxes if there are too many
     fg_indexes <- let fg_indexes = V.filter (\(i, j) -> Repa.index overlaps (Z :. i :. j) >= fg_overlap) (V.indexed maxIndices)
@@ -142,12 +140,12 @@ sample_rois rois gt prop = do
 
     let keep_indexes = V.map fst $ fg_indexes V.++ bg_indexes
 
-        rois_keep    = V.map (rois %!) keep_indexes
+        rois_keep    = V.map (rois ^%!) keep_indexes
         roi_box_keep = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois_keep
 
-        gt_keep      = V.map (gt_chosen  %!) keep_indexes
+        gt_keep      = V.map (gt_chosen  ^%!) keep_indexes
         gt_box_keep  = V.map (Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt_keep
-        labels_keep  = V.take (length fg_indexes) (V.map (#! 4) gt_keep) V.++ V.replicate bg_rois_this_image 0
+        labels_keep  = V.take (length fg_indexes) (V.map (^#! 4) gt_keep) V.++ V.replicate bg_rois_this_image 0
 
         targets = V.zipWith (bboxTransform box_stds) roi_box_keep gt_box_keep
 
@@ -157,12 +155,12 @@ sample_rois rois gt prop = do
 
     -- only assign regression and weights for the foreground boxes.
     forM_ [0..length fg_indexes-1] $ \i -> do
-        let lbl = floor (labels_keep %! i)
-            tgt = targets %! i
+        let lbl = floor (labels_keep ^%! i)
+            tgt = targets ^%! i
         assert (lbl >= 0 && lbl < num_classes) (return ())
         let tgt_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_target
         forM_ [0..3] $ \i ->
-            UVM.write tgt_dst i (tgt #! i)
+            UVM.write tgt_dst i (tgt ^#! i)
         let wgh_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_weight
         UVM.set wgh_dst 1
 
@@ -189,15 +187,16 @@ overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
     area2 = V.map bboxArea gt
 
     calcOvp (Z :. ind_rois :. ind_gt) =
-        case bboxIntersect (rois %! ind_rois) (gt %! ind_gt) of
+        case bboxIntersect (rois ^%! ind_rois) (gt ^%! ind_gt) of
            Nothing -> 0
            Just boxI -> let areaI = bboxArea boxI
-                            areaU = area1 %! ind_rois + area2 %! ind_gt - areaI
+                            areaU = area1 ^%! ind_rois + area2 ^%! ind_gt - areaI
                         in areaI / areaU
 
 
-a %! i = a ^?! ix i
-a #! i = a ^?! ixr (Repa.fromIndex (extent a) i)
+(^%!) :: HasCallStack => V.Vector a -> Int -> a
+-- a ^%! i = a V.! i
+a ^%! i = V.unsafeIndex a i
 
 
 -- test_sample_rois = let
