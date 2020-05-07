@@ -7,7 +7,7 @@ extra-deps:
 - ../fei-nn
 - ../fei-base
 - ../tuple-ops
-- git: https://github.com/kylcarte/type-combinators.git
+- git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
   commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
