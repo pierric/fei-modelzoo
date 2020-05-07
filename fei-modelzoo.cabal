@@ -1,5 +1,5 @@
 name:                       fei-modelzoo
-version:                    0.1.0
+version:                    0.2.0
 synopsis:                   A collection of standard models
 description:                A collection of standard models
 homepage:                   http://github.com/pierric/fei-modelzoo
@@ -28,6 +28,7 @@ Library
                             TypeFamilies,
                             OverloadedLabels,
                             OverloadedStrings,
+                            OverloadedLists,
                             FlexibleContexts,
                             FlexibleInstances,
                             StandaloneDeriving,
@@ -36,18 +37,21 @@ Library
                             TypeOperators,
                             TypeApplications,
                             PartialTypeSignatures,
-                            TemplateHaskell
+                            LambdaCase,
+                            MultiWayIf,
+                            DoAndIfThenElse,
+                            TemplateHaskell,
+                            NoImplicitPrelude
     build-depends:          base >= 4.7 && < 5.0
-                          , vector
-                          , mtl
                           , lens
                           , transformers-base
-                          , containers
-                          , unordered-containers
                           , repa
                           , lens
-                          , text
                           , random-fu
                           , ansi-wl-pprint
+                          , vector
+                          , text
+                          , rio
+                          , formatting
                           , fei-base
                           , fei-nn

@@ -1,17 +1,16 @@
 module MXNet.NN.ModelZoo.RCNN.ProposalTarget where
 
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as UV
+import RIO
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Boxed.Unsafe as V
+import qualified RIO.Vector.Unboxed as UV
 import qualified Data.Vector.Unboxed.Mutable as UVM
 import qualified Data.Array.Repa as Repa
 import Data.Array.Repa (Array, U, D)
 import Data.Array.Repa.Index
 import Data.Random (shuffle, runRVar, StdRandom(..))
 import Data.Random.Vector (randomElement)
-import Control.Lens ((^.), (^?!), ix, makeLenses)
-import Control.Monad (replicateM, forM_, join)
-import Control.Exception.Base(assert)
-import GHC.Stack (HasCallStack)
+import Control.Lens (makeLenses)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
@@ -43,13 +42,13 @@ instance CustomOperationProp ProposalTargetProp where
         in ([rpn_rois_shape, gt_boxes_shape],
             [output_rois_shape, label_shape, bbox_target_shape, bbox_weight_shape],
             [])
-    prop_declare_backward_dependency prop grad_out data_in data_out = []
+    prop_declare_backward_dependency _ _ _ _ = []
 
     data Operation ProposalTargetProp = ProposalTarget ProposalTargetProp
     prop_create_operator prop _ _ = return (ProposalTarget prop)
 
 instance CustomOperation (Operation ProposalTargetProp) where
-    forward (ProposalTarget prop) [ReqWrite, ReqWrite, ReqWrite, ReqWrite] inputs outputs aux is_train = do
+    forward (ProposalTarget prop) [ReqWrite, ReqWrite, ReqWrite, ReqWrite] inputs outputs _ _ = do
         -- :param: rois, shape of (N*nms_top_n, 5), [image_index_in_batch, bbox0, bbox1, bbox2, bbox3]
         -- :param: gt_boxes, shape of (N, M, 5), M varies per image. [bbox0, bbox1, bbox2, bbox3, class]
         let [rois, gt_boxes] = inputs
@@ -135,7 +134,7 @@ sample_rois rois gt prop = do
                       num_bg_indexes = length bg_indexes
                   in case compare num_bg_indexes bg_rois_this_image of
                         GT -> V.fromList . take bg_rois_this_image <$> runRVar' (shuffle $ V.toList bg_indexes)
-                        LT -> V.fromList <$> runRVar' (replicateM bg_rois_this_image (randomElement bg_indexes))
+                        LT -> runRVar' (V.replicateM bg_rois_this_image (randomElement bg_indexes))
                         EQ -> return bg_indexes
 
     let keep_indexes = V.map fst $ fg_indexes V.++ bg_indexes
@@ -154,13 +153,13 @@ sample_rois rois gt prop = do
     bbox_weight <- UVM.replicate (rois_per_image * 4 * num_classes) (0 :: Float)
 
     -- only assign regression and weights for the foreground boxes.
-    forM_ [0..length fg_indexes-1] $ \i -> do
+    forM_ ([0..length fg_indexes-1] :: [Int]) $ \i -> do
         let lbl = floor (labels_keep ^%! i)
             tgt = targets ^%! i
         assert (lbl >= 0 && lbl < num_classes) (return ())
         let tgt_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_target
-        forM_ [0..3] $ \i ->
-            UVM.write tgt_dst i (tgt ^#! i)
+        forM_ ([0..3] :: [Int]) $ \j ->
+            UVM.write tgt_dst j (tgt ^#! j)
         let wgh_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_weight
         UVM.set wgh_dst 1
 

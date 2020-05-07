@@ -1,5 +1,6 @@
 module MXNet.NN.ModelZoo.Lenet where
 
+import RIO
 import MXNet.Base
 import MXNet.NN.Layer
 

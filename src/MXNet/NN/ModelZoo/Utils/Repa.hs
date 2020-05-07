@@ -2,17 +2,22 @@
 {-# LANGUAGE Rank2Types #-}
 module MXNet.NN.ModelZoo.Utils.Repa where
 
+import RIO
+import RIO.List (splitAt)
+import RIO.List.Partial (last)
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Boxed.Partial as V (tail, foldl1')
+import qualified RIO.Vector.Unboxed as VU
+import qualified RIO.Vector.Unboxed.Partial as VU (maxIndex)
+import Control.Exception (throw)
 import Control.Lens
-import Control.Exception.Base(throw, Exception)
 import Data.Array.Repa (Shape, Array, U, DIM1, DIM2, DIM3, All(..), Z(..), (:.)(..), extent, toUnboxed)
 import qualified Data.Array.Repa as Repa
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as VU
 import Text.PrettyPrint.ANSI.Leijen (Pretty(..), (<+>), text)
-import GHC.Stack (HasCallStack)
 
-instance (Pretty e, VU.Unbox e, Shape d) => Pretty (Array U d e) where
-    pretty arr = text (Repa.showShape $ extent arr) <+> pretty (VU.toList $ toUnboxed arr)
+newtype PrettyArray u s e = PrettyArray (Array u s e)
+instance (Pretty e, VU.Unbox e, Shape d) => Pretty (PrettyArray U d e) where
+    pretty (PrettyArray arr) = text (Repa.showShape $ extent arr) <+> pretty (VU.toList $ toUnboxed arr)
 
 class IxedReadOnly m where
     ixr :: Index m -> Fold m (IxValue m)
