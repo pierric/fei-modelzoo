@@ -14,8 +14,8 @@ import Control.Lens (makeLenses)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
+import MXNet.NN.Utils.Repa
 import MXNet.NN.ModelZoo.Utils.Box
-import MXNet.NN.ModelZoo.Utils.Repa
 
 
 data ProposalTargetProp = ProposalTargetProp {

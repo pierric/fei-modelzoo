@@ -4,7 +4,7 @@ import RIO
 import Data.Array.Repa (Array, U, DIM1, Z(..), (:.)(..))
 import qualified Data.Array.Repa as Repa
 
-import MXNet.NN.ModelZoo.Utils.Repa
+import MXNet.NN.Utils.Repa
 
 
 type RBox = Array U DIM1 Float

@@ -19,7 +19,6 @@ Library
                             MXNet.NN.ModelZoo.Resnext
                             MXNet.NN.ModelZoo.RCNN.FasterRCNN
                             MXNet.NN.ModelZoo.RCNN.ProposalTarget
-                            MXNet.NN.ModelZoo.Utils.Repa
                             MXNet.NN.ModelZoo.Utils.Box
     hs-source-dirs:         src
     ghc-options:            -Wall
@@ -48,7 +47,6 @@ Library
                           , repa
                           , lens
                           , random-fu
-                          , ansi-wl-pprint
                           , vector
                           , text
                           , rio

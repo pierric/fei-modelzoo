@@ -20,9 +20,9 @@ import qualified MXNet.Base.NDArray as A
 import qualified MXNet.NN.NDArray as A
 import MXNet.NN.Layer
 import MXNet.NN.EvalMetric
+import MXNet.NN.Utils.Repa
 import qualified MXNet.NN.ModelZoo.VGG as VGG
 import qualified MXNet.NN.ModelZoo.Resnet as Resnet
-import MXNet.NN.ModelZoo.Utils.Repa
 
 data Backbone = VGG16 | RESNET50 | RESNET101
   deriving (Show, Read, Eq)
@@ -420,10 +420,6 @@ instance EvalMetricMethod RPNLogLossMetric where
                     (mask ^#!)
                     (\i -> let cls = floor (label ^#! i)
                            in pred ^?! ixr (Z :. i :. cls))
-                    size
-        label <- Repa.selectP
-                    (mask ^#!)
-                    (label ^#!)
                     size
 
         let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
