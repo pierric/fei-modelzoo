@@ -35,10 +35,10 @@ instance CustomOperationProp ProposalTargetProp where
     prop_infer_shape prop [rpn_rois_shape, gt_boxes_shape] =
         let prop_batch_size   = prop ^. pt_batch_rois
             prop_num_classes  = prop ^. pt_num_classes
-            output_rois_shape = [prop_batch_size, 5]
-            label_shape       = [prop_batch_size]
-            bbox_target_shape = [prop_batch_size, prop_num_classes * 4]
-            bbox_weight_shape = [prop_batch_size, prop_num_classes * 4]
+            output_rois_shape = STensor [prop_batch_size, 5]
+            label_shape       = STensor [prop_batch_size]
+            bbox_target_shape = STensor [prop_batch_size, prop_num_classes * 4]
+            bbox_weight_shape = STensor [prop_batch_size, prop_num_classes * 4]
         in ([rpn_rois_shape, gt_boxes_shape],
             [output_rois_shape, label_shape, bbox_target_shape, bbox_weight_shape],
             [])
