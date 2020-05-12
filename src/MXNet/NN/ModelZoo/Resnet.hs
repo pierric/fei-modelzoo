@@ -1,10 +1,11 @@
 module MXNet.NN.ModelZoo.Resnet where
 
-import Text.Printf
-import Data.Maybe (fromMaybe)
+import RIO
+import RIO.List (zip3)
+import qualified RIO.NonEmpty as RNE
+import qualified RIO.Text as T
 import Data.Typeable (Typeable)
-import Control.Monad (foldM, when, void)
-import Control.Exception.Base (Exception, throw, throwIO)
+import Formatting
 
 import MXNet.Base
 import MXNet.NN.Layer
@@ -16,6 +17,9 @@ instance Exception NoKnownExperiment
 -------------------------------------------------------------------------------
 -- ResNet
 
+(##) :: Text -> Text -> Text
+(##) = T.append
+
 symbol :: DType a => Int -> Int -> Int -> IO (Symbol a)
 symbol num_classes num_layers image_size = do
     let args = if image_size <= 28 then args_small_image else args_large_image
@@ -23,8 +27,8 @@ symbol num_classes num_layers image_size = do
     x <- variable "x"
     y <- variable "y"
 
-    (u, makeTop) <- getFeature x args
-    u <- makeTop u
+    (u0, makeTop) <- getFeature x args
+    u <- makeTop u0
 
     flt <- flatten "flt" (#data := u .& Nil)
     fc1 <- fullyConnected "output" (#data := flt .& #num_hidden := num_classes .& Nil)
@@ -34,15 +38,17 @@ symbol num_classes num_layers image_size = do
 
   where
     args_common = #workspace := 256 .& Nil
+    unit0 = (num_layers - 2) `div` 9
+    unit1 = (num_layers - 2) `div` 6
     args_small_image
         | (num_layers - 2) `mod` 9 == 0 && num_layers >= 164 = #num_stages := 3
                                                            .& #filter_list := [64, 64, 128, 256]
-                                                           .& #units := replicate 3 ((num_layers - 2) `div` 9)
+                                                           .& #units := [unit0, unit0, unit0]
                                                            .& #bottle_neck := True
                                                            .& args_common
         | (num_layers - 2) `mod` 6 == 0 && num_layers < 164 = #num_stages := 3
                                                           .& #filter_list := [64, 64, 32, 64]
-                                                          .& #units := replicate 3 ((num_layers - 2) `div` 6)
+                                                          .& #units := [unit1, unit1, unit1]
                                                           .& #bottle_neck := False
                                                           .& args_common
 
@@ -91,8 +97,8 @@ bn_mom = 0.9
 
 type instance ParameterList "resnet" =
   '[ '("num_stages" , 'AttrReq Int)
-   , '("filter_list", 'AttrReq [Int])
-   , '("units"      , 'AttrReq [Int])
+   , '("filter_list", 'AttrReq (NonEmpty Int))
+   , '("units"      , 'AttrReq (NonEmpty Int))
    , '("bottle_neck", 'AttrReq Bool)
    , '("workspace"  , 'AttrReq Int)]
 
@@ -132,8 +138,8 @@ getFeature inp args = do
     return (bdy, flip getTopFeature args)
 
   where
-    filter0 : filter_list = args ! #filter_list
-    units = args ! #units
+    filter0 :| filter_list = args ! #filter_list
+    units = RNE.toList $ args ! #units
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
@@ -156,8 +162,8 @@ getTopFeature inp args = do
 
     return pl1
   where
-    filter = last $ args ! #filter_list
-    unit = last $ args ! #units
+    filter = RNE.last $ args ! #filter_list
+    unit = RNE.last $ args ! #units
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
@@ -165,11 +171,17 @@ buildLayer :: Bool -> Int -> SymbolHandle -> (Int, Int, Int) -> IO SymbolHandle
 buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) = do
     bdy <- residual (name 0) (#data := bdy .& #num_filter := filter_size .& #stride := stride0 .& #dim_match := False .& resargs)
     foldM (\bdy unit_id ->
-            residual (name unit_id) (#data := bdy .& #num_filter := filter_size .& #stride := [1,1] .& #dim_match := True .& resargs))
-          bdy [1..unit-1]
+            residual (name unit_id)
+                     (#data := bdy
+                   .& #num_filter := filter_size
+                   .& #stride := [1,1]
+                   .& #dim_match := True
+                   .& resargs))
+          bdy
+          ([1..unit-1] :: [Int])
   where
     stride0 = if stage_id == 0 then [1,1] else [2,2]
-    name unit_id = printf "features.%d.%d" (stage_id+5) unit_id
+    name unit_id = sformat ("features." % int % "." % int) (stage_id+5) unit_id
     resargs = #bottle_neck := bottle_neck .& #workspace := workspace .& #memonger := False .& Nil
 
 type instance ParameterList "_residual_layer(resnet)" =
@@ -182,7 +194,7 @@ type instance ParameterList "_residual_layer(resnet)" =
    , '("workspace"  , 'AttrOpt Int)
    , '("memonger"   , 'AttrOpt Bool) ]
 residual :: (Fullfilled "_residual_layer(resnet)" args)
-         => String -> ArgsHMap "_residual_layer(resnet)" args -> IO SymbolHandle
+         => Text -> ArgsHMap "_residual_layer(resnet)" args -> IO SymbolHandle
 residual name args = do
     let dat        = args ! #data
         num_filter = args ! #num_filter
@@ -194,12 +206,12 @@ residual name args = do
         memonger   = fromMaybe False$ args !? #memonger
     if bottle_neck
       then do
-        bn1 <- batchnorm (name ++ ".bn1") (#data := dat
+        bn1 <- batchnorm (name ## ".bn1") (#data := dat
                                         .& #eps  := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False .& Nil)
-        act1 <- activation (name ++ ".relu1") (#data := bn1 .& #act_type := #relu .& Nil)
-        conv1 <- convolution (name ++ ".conv1") (#data := act1
+        act1 <- activation (name ## ".relu1") (#data := bn1 .& #act_type := #relu .& Nil)
+        conv1 <- convolution (name ## ".conv1") (#data := act1
                                               .& #kernel := [1,1]
                                               .& #num_filter := num_filter `div` 4
                                               .& #stride := [1,1]
@@ -207,15 +219,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn2 <- batchnorm (name ++ ".bn2") (#data := conv1
+        bn2 <- batchnorm (name ## ".bn2") (#data := conv1
                                         .& #eps  := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act2 <- activation (name ++ ".relu2") (#data := bn2
+        act2 <- activation (name ## ".relu2") (#data := bn2
                                             .& #act_type := #relu
                                             .& Nil)
-        conv2 <- convolution (name ++ ".conv2") (#data := act2
+        conv2 <- convolution (name ## ".conv2") (#data := act2
                                               .& #kernel := [3,3]
                                               .& #num_filter := (num_filter `div` 4)
                                               .& #stride    := stride
@@ -223,15 +235,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn3 <- batchnorm (name ++ ".bn3") (#data      := conv2
+        bn3 <- batchnorm (name ## ".bn3") (#data      := conv2
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act3 <- activation (name ++ ".relu3") (#data := bn3
+        act3 <- activation (name ## ".relu3") (#data := bn3
                                             .& #act_type := #relu
                                             .& Nil)
-        conv3 <- convolution (name ++ ".conv3") (#data := act3
+        conv3 <- convolution (name ## ".conv3") (#data := act3
                                               .& #kernel := [1,1]
                                               .& #num_filter := num_filter
                                               .& #stride    := [1,1]
@@ -241,7 +253,7 @@ residual name args = do
                                               .& Nil)
         shortcut <- if dim_match
                     then return dat
-                    else convolution (name ++ ".downsample") (#data       := act1
+                    else convolution (name ## ".downsample") (#data       := act1
                                                    .& #kernel     := [1,1]
                                                    .& #num_filter := num_filter
                                                    .& #stride     := stride
@@ -252,14 +264,14 @@ residual name args = do
           void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
         plus name (#lhs := conv3 .& #rhs := shortcut .& Nil)
       else do
-        bn1 <- batchnorm (name ++ ".bn1") (#data      := dat
+        bn1 <- batchnorm (name ## ".bn1") (#data      := dat
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act1 <- activation (name ++ ".relu1") (#data      := bn1
+        act1 <- activation (name ## ".relu1") (#data      := bn1
                                             .& #act_type  := #relu .& Nil)
-        conv1 <- convolution (name ++ ".conv1") (#data      := act1
+        conv1 <- convolution (name ## ".conv1") (#data      := act1
                                               .& #kernel    := [3,3]
                                               .& #num_filter:= num_filter
                                               .& #stride    := stride
@@ -267,15 +279,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn2 <- batchnorm (name ++ ".bn2") (#data      := conv1
+        bn2 <- batchnorm (name ## ".bn2") (#data      := conv1
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act2 <- activation (name ++ ".relu2") (#data      := bn2
+        act2 <- activation (name ## ".relu2") (#data      := bn2
                                             .& #act_type  := #relu
                                             .& Nil)
-        conv2 <- convolution (name ++ ".conv2") (#data      := act2
+        conv2 <- convolution (name ## ".conv2") (#data      := act2
                                               .& #kernel    := [3,3]
                                               .& #num_filter:= num_filter
                                               .& #stride    := [1,1]
@@ -285,7 +297,7 @@ residual name args = do
                                               .& Nil)
         shortcut <- if dim_match
                     then return dat
-                    else convolution (name ++ ".downsample") (#data      := act1
+                    else convolution (name ## ".downsample") (#data      := act1
                                                    .& #kernel    := [1,1]
                                                    .& #num_filter:= num_filter
                                                    .& #stride    := stride

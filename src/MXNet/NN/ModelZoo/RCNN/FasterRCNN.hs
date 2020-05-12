@@ -1,16 +1,15 @@
 module MXNet.NN.ModelZoo.RCNN.FasterRCNN where
 
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as UV
-import qualified Data.HashMap.Strict as M
-import Data.IORef
-import Data.Bifunctor
+import RIO
+import qualified RIO.Text as T
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Unboxed as UV
+import qualified RIO.HashMap as M
 import Data.Array.Repa.Index
 import Data.Array.Repa.Shape
 import qualified Data.Array.Repa as Repa
-import Control.Monad.IO.Class (liftIO)
-import Control.Lens ((^?!), ix)
-import Text.Printf (printf)
+import Control.Lens ((^?!), ix, bimap)
+import Formatting
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (argmax, argmax_channel)
@@ -21,9 +20,9 @@ import qualified MXNet.Base.NDArray as A
 import qualified MXNet.NN.NDArray as A
 import MXNet.NN.Layer
 import MXNet.NN.EvalMetric
+import MXNet.NN.Utils.Repa
 import qualified MXNet.NN.ModelZoo.VGG as VGG
 import qualified MXNet.NN.ModelZoo.Resnet as Resnet
-import MXNet.NN.ModelZoo.Utils.Repa
 
 data Backbone = VGG16 | RESNET50 | RESNET101
   deriving (Show, Read, Eq)
@@ -156,7 +155,7 @@ symbolTrain RcnnConfiguration{..} =  do
                                  .& #fg_overlap  :≅ rcnn_fg_overlap
                                  .& #box_stds    :≅ rcnn_bbox_stds
                                  .& Nil)
-    [rois, label, bboxTarget, bboxWeight] <- mapM (at proposal) [0..3]
+    [rois, label, bboxTarget, bboxWeight] <- mapM (at proposal) ([0..3] :: [_])
 
     ---------------------------
     -- cls_prob part
@@ -284,10 +283,10 @@ symbolInfer RcnnConfiguration{..} = do
     Symbol <$> group [rois, clsProb, bboxPred]
 
 --------------------------------
-data RPNAccMetric a = RPNAccMetric Int String
+data RPNAccMetric a = RPNAccMetric Int Text
 
 instance EvalMetricMethod RPNAccMetric where
-    data MetricData RPNAccMetric a = RPNAccMetricData String Int String (IORef Int) (IORef Int)
+    data MetricData RPNAccMetric a = RPNAccMetricData Text Int Text (IORef Int) (IORef Int)
     newMetric phase (RPNAccMetric oindex label) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
@@ -296,11 +295,11 @@ instance EvalMetricMethod RPNAccMetric where
     format (RPNAccMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RPNAcc: %0.2f>" (100 * fromIntegral s / fromIntegral n :: Float)
+        return $ sformat ("<RPNAcc: " % fixed 2 % ">") (100 * fromIntegral s / fromIntegral n :: Float)
 
     evaluate (RPNAccMetricData phase oindex lname cntRef sumRef) bindings outputs = liftIO $  do
-        let label = bindings M.! lname
-            pred  = outputs !! oindex
+        let label = bindings ^?! ix lname
+            pred  = outputs  ^?! ix oindex
 
         pred <- A.makeNDArrayLike pred contextCPU >>= A.copy pred
         label <- V.convert <$> toVector label
@@ -317,14 +316,14 @@ instance EvalMetricMethod RPNAccMetric where
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = fromIntegral s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        return $ M.singleton (phase `T.append` "_acc") acc
 
 
 data RCNNAccMetric a = RCNNAccMetric Int Int
 
 instance EvalMetricMethod RCNNAccMetric where
     data MetricData RCNNAccMetric a = RCNNAccMetricData {
-        _rcnn_acc_phase :: String,
+        _rcnn_acc_phase :: Text,
         _rcnn_acc_cindex :: Int,
         _rcnn_acc_lindex :: Int,
         _rcnn_acc_all :: IORef (Int, Int),
@@ -338,15 +337,15 @@ instance EvalMetricMethod RCNNAccMetric where
     format (RCNNAccMetricData _ _ _ accum_all accum_fg) = liftIO $ do
         (all_s, all_n) <- liftIO $ readIORef accum_all
         (fg_s, fg_n)   <- liftIO $ readIORef accum_fg
-        return $ printf "<RCNNAcc: %0.2f %0.2f>"
+        return $ sformat ("<RCNNAcc: " % fixed 2 % " " % fixed 2 % ">")
             (100 * fromIntegral all_s / fromIntegral all_n :: Float)
             (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
 
-    evaluate rcnn_acc bindings outputs = liftIO $  do
+    evaluate rcnn_acc _ outputs = liftIO $  do
         -- cls_prob: (batch_size, #num_anchors*feat_w*feat_h, #num_classes)
         -- label:    (batch_size, #num_anchors*feat_w*feat_h)
-        let cls_prob = outputs !! _rcnn_acc_cindex rcnn_acc
-            label    = outputs !! _rcnn_acc_lindex rcnn_acc
+        let cls_prob = outputs ^?! ix (_rcnn_acc_cindex rcnn_acc)
+            label    = outputs ^?! ix (_rcnn_acc_lindex rcnn_acc)
 
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
@@ -382,13 +381,13 @@ instance EvalMetricMethod RCNNAccMetric where
             fg_acc  = fromIntegral fg_s  / fromIntegral fg_n
             phase   = _rcnn_acc_phase rcnn_acc
         return $ M.fromList [
-            (phase ++ "_with_bg_acc", all_acc),
-            (phase ++ "_fg_only_acc", fg_acc)]
+            (phase `T.append` "_with_bg_acc", all_acc),
+            (phase `T.append` "_fg_only_acc", fg_acc)]
 
-data RPNLogLossMetric a = RPNLogLossMetric Int String
+data RPNLogLossMetric a = RPNLogLossMetric Int Text
 
 instance EvalMetricMethod RPNLogLossMetric where
-    data MetricData RPNLogLossMetric a = RPNLogLossMetricData String Int String (IORef Int) (IORef Double)
+    data MetricData RPNLogLossMetric a = RPNLogLossMetricData Text Int Text (IORef Int) (IORef Double)
     newMetric phase (RPNLogLossMetric cindex lname) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
@@ -397,11 +396,11 @@ instance EvalMetricMethod RPNLogLossMetric where
     format (RPNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RPNLogLoss: %0.4f>" (realToFrac s / fromIntegral n :: Float)
+        return $ sformat ("<RPNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evaluate (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
-        let cls_prob = outputs !! cindex
-            label    = bindings M.! lname
+        let cls_prob = outputs  ^?! ix cindex
+            label    = bindings ^?! ix lname
 
         -- (batch_size, #num_anchors*feat_w*feat_h) to (batch_size*#num_anchors*feat_w*feat_h,)
         label <- A.reshape label [-1]
@@ -422,10 +421,6 @@ instance EvalMetricMethod RPNLogLossMetric where
                     (\i -> let cls = floor (label ^#! i)
                            in pred ^?! ixr (Z :. i :. cls))
                     size
-        label <- Repa.selectP
-                    (mask ^#!)
-                    (label ^#!)
-                    size
 
         let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
         cls_loss_val <- realToFrac <$> Repa.sumAllP pred_with_ep
@@ -435,12 +430,12 @@ instance EvalMetricMethod RPNLogLossMetric where
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        return $ M.singleton (phase `T.append` "_acc") acc
 
 data RCNNLogLossMetric a = RCNNLogLossMetric Int Int
 
 instance EvalMetricMethod RCNNLogLossMetric where
-    data MetricData RCNNLogLossMetric a = RCNNLogLossMetricData String Int Int (IORef Int) (IORef Double)
+    data MetricData RCNNLogLossMetric a = RCNNLogLossMetricData Text Int Int (IORef Int) (IORef Double)
     newMetric phase (RCNNLogLossMetric cindex lindex) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
@@ -449,11 +444,11 @@ instance EvalMetricMethod RCNNLogLossMetric where
     format (RCNNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RCNNLogLoss: %0.4f>" (realToFrac s / fromIntegral n :: Float)
+        return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) bindings outputs = liftIO $  do
-        cls_prob <- toRepa @DIM3 (outputs !! cindex)
-        label    <- toRepa @DIM2 (outputs !! lindex)
+    evaluate (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) _ outputs = liftIO $  do
+        cls_prob <- toRepa @DIM3 (outputs ^?! ix cindex)
+        label    <- toRepa @DIM2 (outputs ^?! ix lindex)
 
         let lbl_shp@(Z :. _ :. num_lbl) = Repa.extent label
             cls = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
@@ -467,12 +462,12 @@ instance EvalMetricMethod RCNNLogLossMetric where
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        return $ M.singleton (phase `T.append` "_acc") acc
 
-data RPNL1LossMetric a = RPNL1LossMetric Int String
+data RPNL1LossMetric a = RPNL1LossMetric Int Text
 
 instance EvalMetricMethod RPNL1LossMetric where
-    data MetricData RPNL1LossMetric a = RPNL1LossMetricData String Int String (IORef Int) (IORef Double)
+    data MetricData RPNL1LossMetric a = RPNL1LossMetricData Text Int Text (IORef Int) (IORef Double)
     newMetric phase (RPNL1LossMetric bindex blabel) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
@@ -481,13 +476,13 @@ instance EvalMetricMethod RPNL1LossMetric where
     format (RPNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RPNL1Loss: %0.3f>" (realToFrac s / fromIntegral n :: Float)
+        return $ sformat ("<RPNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evaluate (RPNL1LossMetricData phase bindex blabel cntRef sumRef) bindings outputs = liftIO $  do
-        bbox_loss   <- toRepa @DIM4 (outputs !! bindex)
+        bbox_loss   <- toRepa @DIM4 (outputs ^?! ix bindex)
         all_loss    <- Repa.sumAllP bbox_loss
 
-        bbox_weight <- toRepa @DIM4 (bindings M.! blabel)
+        bbox_weight <- toRepa @DIM4 (bindings ^?! ix blabel)
         all_pos_weight <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) bbox_weight
 
         modifyIORef' sumRef (+ realToFrac all_loss)
@@ -496,12 +491,12 @@ instance EvalMetricMethod RPNL1LossMetric where
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        return $ M.singleton (phase `T.append` "_acc") acc
 
 data RCNNL1LossMetric a = RCNNL1LossMetric Int Int
 
 instance EvalMetricMethod RCNNL1LossMetric where
-    data MetricData RCNNL1LossMetric a = RCNNL1LossMetricData String Int Int (IORef Int) (IORef Double)
+    data MetricData RCNNL1LossMetric a = RCNNL1LossMetricData Text Int Int (IORef Int) (IORef Double)
     newMetric phase (RCNNL1LossMetric bindex lindex) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
@@ -510,13 +505,13 @@ instance EvalMetricMethod RCNNL1LossMetric where
     format (RCNNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RCNNL1Loss: %0.3f>" (realToFrac s / fromIntegral n :: Float)
+        return $ sformat ("<RCNNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) bindings outputs = liftIO $ do
-        bbox_loss <- toRepa @DIM3 (outputs !! bindex)
+    evaluate (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) _ outputs = liftIO $ do
+        bbox_loss <- toRepa @DIM3 (outputs ^?! ix bindex)
         all_loss  <- Repa.sumAllP bbox_loss
 
-        label     <- toRepa @DIM2 (outputs !! lindex)
+        label     <- toRepa @DIM2 (outputs ^?! ix lindex)
         all_pos   <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) label
 
         modifyIORef' sumRef (+ realToFrac all_loss)
@@ -525,7 +520,7 @@ instance EvalMetricMethod RCNNL1LossMetric where
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        return $ M.singleton (phase `T.append` "_acc") acc
 
 constant :: (Shape sh, UV.Unbox a) => sh -> a -> Repa.Array Repa.U sh a
 constant shp val = Repa.fromListUnboxed shp (replicate (size shp) val)
