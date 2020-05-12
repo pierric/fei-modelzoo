@@ -292,12 +292,12 @@ instance EvalMetricMethod RPNAccMetric where
         b <- liftIO $ newIORef 0
         return $ RPNAccMetricData phase oindex label a b
 
-    format (RPNAccMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNAccMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNAcc: " % fixed 2 % ">") (100 * fromIntegral s / fromIntegral n :: Float)
 
-    evaluate (RPNAccMetricData phase oindex lname cntRef sumRef) bindings outputs = liftIO $  do
+    evalMetric (RPNAccMetricData phase oindex lname cntRef sumRef) bindings outputs = liftIO $  do
         let label = bindings ^?! ix lname
             pred  = outputs  ^?! ix oindex
 
@@ -334,14 +334,14 @@ instance EvalMetricMethod RCNNAccMetric where
         b <- liftIO $ newIORef (0, 0)
         return $ RCNNAccMetricData phase cindex lindex a b
 
-    format (RCNNAccMetricData _ _ _ accum_all accum_fg) = liftIO $ do
+    formatMetric (RCNNAccMetricData _ _ _ accum_all accum_fg) = liftIO $ do
         (all_s, all_n) <- liftIO $ readIORef accum_all
         (fg_s, fg_n)   <- liftIO $ readIORef accum_fg
         return $ sformat ("<RCNNAcc: " % fixed 2 % " " % fixed 2 % ">")
             (100 * fromIntegral all_s / fromIntegral all_n :: Float)
             (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
 
-    evaluate rcnn_acc _ outputs = liftIO $  do
+    evalMetric rcnn_acc _ outputs = liftIO $  do
         -- cls_prob: (batch_size, #num_anchors*feat_w*feat_h, #num_classes)
         -- label:    (batch_size, #num_anchors*feat_w*feat_h)
         let cls_prob = outputs ^?! ix (_rcnn_acc_cindex rcnn_acc)
@@ -393,12 +393,12 @@ instance EvalMetricMethod RPNLogLossMetric where
         b <- liftIO $ newIORef 0
         return $ RPNLogLossMetricData phase cindex lname a b
 
-    format (RPNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
+    evalMetric (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
         let cls_prob = outputs  ^?! ix cindex
             label    = bindings ^?! ix lname
 
@@ -441,12 +441,12 @@ instance EvalMetricMethod RCNNLogLossMetric where
         b <- liftIO $ newIORef 0
         return $ RCNNLogLossMetricData phase cindex lindex a b
 
-    format (RCNNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RCNNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) _ outputs = liftIO $  do
+    evalMetric (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) _ outputs = liftIO $  do
         cls_prob <- toRepa @DIM3 (outputs ^?! ix cindex)
         label    <- toRepa @DIM2 (outputs ^?! ix lindex)
 
@@ -473,12 +473,12 @@ instance EvalMetricMethod RPNL1LossMetric where
         b <- liftIO $ newIORef 0
         return $ RPNL1LossMetricData phase bindex blabel a b
 
-    format (RPNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RPNL1LossMetricData phase bindex blabel cntRef sumRef) bindings outputs = liftIO $  do
+    evalMetric (RPNL1LossMetricData phase bindex blabel cntRef sumRef) bindings outputs = liftIO $  do
         bbox_loss   <- toRepa @DIM4 (outputs ^?! ix bindex)
         all_loss    <- Repa.sumAllP bbox_loss
 
@@ -502,12 +502,12 @@ instance EvalMetricMethod RCNNL1LossMetric where
         b <- liftIO $ newIORef 0
         return $ RCNNL1LossMetricData phase bindex lindex a b
 
-    format (RCNNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RCNNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RCNNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) _ outputs = liftIO $ do
+    evalMetric (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) _ outputs = liftIO $ do
         bbox_loss <- toRepa @DIM3 (outputs ^?! ix bindex)
         all_loss  <- Repa.sumAllP bbox_loss
 
