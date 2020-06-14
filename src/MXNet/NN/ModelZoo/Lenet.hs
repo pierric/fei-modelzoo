@@ -1,8 +1,8 @@
 module MXNet.NN.ModelZoo.Lenet where
 
-import RIO
-import MXNet.Base
-import MXNet.NN.Layer
+import           MXNet.Base
+import           MXNet.NN.Layer
+import           RIO
 
 -- # first conv
 -- conv1 = mx.symbol.Convolution(data=data, kernel=(5,5), num_filter=20)
@@ -21,24 +21,25 @@ import MXNet.NN.Layer
 -- # loss
 -- lenet = mx.symbol.SoftmaxOutput(data=fc2, name='softmax')
 
-symbol :: DType a => IO (Symbol a)
+symbol :: Layer SymbolHandle
 symbol = do
     x  <- variable "x"
     y  <- variable "y"
 
-    v1 <- convolution "conv1"   (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
-    a1 <- activation "conv1-a"  (#data := v1 .& #act_type := #tanh .& Nil)
-    p1 <- pooling "conv1-p"     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+    logit <- sequential (Just "features") $ do
+        v1 <- convolution (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
+        a1 <- activation  (#data := v1 .& #act_type := #tanh .& Nil)
+        p1 <- pooling     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    v2 <- convolution "conv2"   (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
-    a2 <- activation "conv2-a"  (#data := v2 .& #act_type := #tanh .& Nil)
-    p2 <- pooling "conv2-p"     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+        v2 <- convolution (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
+        a2 <- activation  (#data := v2 .& #act_type := #tanh .& Nil)
+        p2 <- pooling     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    fl <- flatten "flatten"     (#data := p2 .& Nil)
+        fl <- flatten     (#data := p2 .& Nil)
 
-    v3 <- fullyConnected "fc1"  (#data := fl .& #num_hidden := 500 .& Nil)
-    a3 <- activation "fc1-a"    (#data := v3 .& #act_type := #tanh .& Nil)
+        v3 <- fullyConnected (#data := fl .& #num_hidden := 500 .& Nil)
+        a3 <- activation     (#data := v3 .& #act_type := #tanh .& Nil)
 
-    v4 <- fullyConnected "fc2"  (#data := a3 .& #num_hidden := 10  .& Nil)
-    a4 <- softmaxoutput "softmax" (#data := v4 .& #label := y .& Nil)
-    return $ Symbol a4
+        fullyConnected    (#data := a3 .& #num_hidden := 10  .& Nil)
+
+    named "output" $ softmaxoutput (#data := logit .& #label := y .& Nil)
