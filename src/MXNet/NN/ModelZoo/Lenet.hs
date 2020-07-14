@@ -26,7 +26,7 @@ symbol = do
     x  <- variable "x"
     y  <- variable "y"
 
-    logit <- sequential (Just "features") $ do
+    logit <- sequential "features" $ do
         v1 <- convolution (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
         a1 <- activation  (#data := v1 .& #act_type := #tanh .& Nil)
         p1 <- pooling     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)

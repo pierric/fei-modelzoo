@@ -1,11 +1,9 @@
 module MXNet.NN.ModelZoo.Resnet where
 
 import           Data.Typeable  (Typeable)
-import           Formatting
 import           RIO
 import           RIO.List       (zip3)
 import qualified RIO.NonEmpty   as RNE
-import qualified RIO.Text       as T
 
 import           MXNet.Base
 import           MXNet.NN.Layer
@@ -16,7 +14,6 @@ instance Exception NoKnownExperiment
 
 -------------------------------------------------------------------------------
 -- ResNet
-rootName = "resnetv22"
 
 resnet50Args = (#num_stages := 4
              .& #filter_list := [64, 256, 512, 1024, 2048]
@@ -24,12 +21,12 @@ resnet50Args = (#num_stages := 4
              .& #bottle_neck := True
              .& #workspace := 256 .& Nil)
 
-resnet50 num_classes x = unique rootName $ do
-    u0  <- getFeature x resnet50Args
-    u1  <- getTopFeature u0 resnet50Args
-    flt <- flatten (#data := u1 .& Nil)
-    ret <- named "dense0"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
-    return ret
+resnet50 num_classes x = do
+    flt <- sequential "features" $ do
+        u0 <- getFeature x resnet50Args
+        u1 <- getTopFeature u0 resnet50Args
+        flatten (#data := u1 .& Nil)
+    named "output"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
 resnet101Args = (#num_stages := 4
              .& #filter_list := [64, 256, 512, 1024, 2048]
@@ -38,12 +35,12 @@ resnet101Args = (#num_stages := 4
              .& #workspace := 256
              .& Nil)
 
-resset101 num_classes x = unique rootName $ do
-    u0  <- getFeature x resnet101Args
-    u1  <- getTopFeature u0 resnet101Args
-    flt <- flatten (#data := u1 .& Nil)
-    ret <- named "dense0"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
-    return ret
+resset101 num_classes x = do
+    flt <- sequential "features" $ do
+        u0 <- getFeature x resnet101Args
+        u1 <- getTopFeature u0 resnet101Args
+        flatten (#data := u1 .& Nil)
+    named "dense0"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
 symbol :: Int -> Int -> Int -> Layer SymbolHandle
 symbol num_classes num_layers image_size = do
@@ -52,13 +49,13 @@ symbol num_classes num_layers image_size = do
     x <- variable "x"
     y <- variable "y"
 
-    flt <- unique rootName $ do
+    flt <- sequential "features" $ do
         u0 <- getFeature x args
         u1 <- getTopFeature u0 args
         flatten (#data := u1 .& Nil)
 
-    logits <- named "dense0" $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
-    ret    <- named "output" $ softmaxoutput  (#data := logits .& #label := y .& Nil)
+    logits <- named "output" $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
+    ret    <- named "softmax" $ softmaxoutput  (#data := logits .& #label := y .& Nil)
     return ret
 
   where
@@ -132,14 +129,12 @@ getFeature :: (Fullfilled "resnet" args)
            -> ArgsHMap "resnet" args
            -> Layer SymbolHandle
 getFeature inp args = do
-    bnx <- named "batchnorm0" $
-           batchnorm   (#data := inp
+    bnx <- batchnorm   (#data := inp
                      .& #eps := eps
                      .& #momentum := bn_mom
                      .& #fix_gamma := True .& Nil)
 
-    bdy <- named "conv0" $
-           convolution (#data      := bnx
+    bdy <- convolution (#data      := bnx
                      .& #kernel    := [7,7]
                      .& #num_filter:= filter0
                      .& #stride    := [2,2]
@@ -147,8 +142,7 @@ getFeature inp args = do
                      .& #workspace := conv_workspace
                      .& #no_bias   := True .& Nil)
 
-    bdy <- named "batchnorm1" $
-           batchnorm   (#data      := bdy
+    bdy <- batchnorm   (#data      := bdy
                      .& #fix_gamma := False
                      .& #eps       := eps
                      .& #momentum  := bn_mom .& Nil)
@@ -175,17 +169,17 @@ getTopFeature :: (Fullfilled "resnet" args)
               => SymbolHandle -> ArgsHMap "resnet" args -> Layer SymbolHandle
 getTopFeature inp args = do
     bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
-    bn1 <- named "batchnorm2" $
-           batchnorm   (#data := bdy -- 9
+    bn1 <- batchnorm   (#data := bdy -- 9
                      .& #eps := eps
                      .& #momentum := bn_mom
                      .& #fix_gamma := False .& Nil)
-    ac1 <- activation (#data := bn1 -- 10
+    ac1 <- unique' $
+           activation (#data := bn1 -- 10
                     .& #act_type := #relu .& Nil)
-    pooling (#data := ac1 -- 11
-          .& #kernel := [7,7]
-          .& #pool_type := #avg
-          .& #global_pool := True .& Nil)
+    unique' $ pooling (#data := ac1 -- 11
+                    .& #kernel := [7,7]
+                    .& #pool_type := #avg
+                    .& #global_pool := True .& Nil)
   where
     filter = RNE.last $ args ! #filter_list
     unit = RNE.last $ args ! #units
@@ -194,7 +188,8 @@ getTopFeature inp args = do
 
 buildLayer :: Bool -> Int -> SymbolHandle -> (Int, Int, Int) -> Layer SymbolHandle
 buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) =
-    unique (sformat ("stage" % int) (stage_id + 1)) $ do
+    -- unique (sformat ("stage" % int) (stage_id + 1)) $ do
+    subscope_next_name $ sequential' $ do
         bdy <- residual (0,0)
                         (#data := bdy
                       .& #num_filter := filter_size
@@ -230,7 +225,7 @@ residual :: (Fullfilled "_residual_layer(resnet)" args)
          => (Int, Int)
          -> ArgsHMap "_residual_layer(resnet)" args
          -> Layer SymbolHandle
-residual (conv_id, bn_id) args = do
+residual (conv_id, bn_id) args = subscope_next_name $ do
     let dat        = args ! #data
         num_filter = args ! #num_filter
         stride     = args ! #stride
@@ -241,14 +236,17 @@ residual (conv_id, bn_id) args = do
         memonger   = fromMaybe False$ args !? #memonger
     if bottle_neck
     then do
-        bn1  <- named (sformat ("batchnorm" % int) bn_id) $
+        bn1  <- -- named (sformat ("batchnorm" % int) bn_id) $
+                named "bn1" $
                 batchnorm   (#data := dat
                           .& #eps  := eps
                           .& #momentum  := bn_mom
                           .& #fix_gamma := False .& Nil)
-        act1 <- activation  (#data := bn1
+        act1 <- unique' $
+                activation  (#data := bn1
                           .& #act_type := #relu .& Nil)
-        conv1<- named (sformat ("conv" % int) conv_id) $
+        conv1<- -- named (sformat ("conv" % int) conv_id) $
+                named "conv1" $
                 convolution (#data := act1
                           .& #kernel := [1,1]
                           .& #num_filter := num_filter `div` 4
@@ -257,14 +255,17 @@ residual (conv_id, bn_id) args = do
                           .& #workspace := workspace
                           .& #no_bias   := True .& Nil)
 
-        bn2  <- named (sformat ("batchnorm" % int) (bn_id + 1)) $
+        bn2  <- -- named (sformat ("batchnorm" % int) (bn_id + 1)) $
+                named "bn2" $
                 batchnorm   (#data := conv1
                           .& #eps  := eps
                           .& #momentum  := bn_mom
                           .& #fix_gamma := False .& Nil)
-        act2 <- activation  (#data := bn2
+        act2 <- unique' $
+                activation  (#data := bn2
                           .& #act_type := #relu .& Nil)
-        conv2<- named (sformat ("conv" % int) (conv_id + 1)) $
+        conv2<- -- named (sformat ("conv" % int) (conv_id + 1)) $
+                named "conv2" $
                 convolution (#data := act2
                           .& #kernel := [3,3]
                           .& #num_filter := (num_filter `div` 4)
@@ -273,25 +274,29 @@ residual (conv_id, bn_id) args = do
                           .& #workspace := workspace
                           .& #no_bias   := True .& Nil)
 
-        bn3   <- named (sformat ("batchnorm" % int) (bn_id + 2)) $
-                 batchnorm  (#data      := conv2
-                          .& #eps       := eps
-                          .& #momentum  := bn_mom
-                          .& #fix_gamma := False .& Nil)
-        act3  <- activation (#data := bn3
-                          .& #act_type := #relu .& Nil)
-        conv3 <- named (sformat ("conv" % int) (conv_id + 2)) $
-                 convolution(#data := act3
-                          .& #kernel := [1,1]
-                          .& #num_filter := num_filter
-                          .& #stride    := [1,1]
-                          .& #pad       := [0,0]
-                          .& #workspace := workspace
-                          .& #no_bias   := True .& Nil)
+        bn3  <- -- named (sformat ("batchnorm" % int) (bn_id + 2)) $
+                named "bn3" $
+                batchnorm  (#data      := conv2
+                         .& #eps       := eps
+                         .& #momentum  := bn_mom
+                         .& #fix_gamma := False .& Nil)
+        act3 <- unique' $
+                activation (#data := bn3
+                         .& #act_type := #relu .& Nil)
+        conv3<- -- named (sformat ("conv" % int) (conv_id + 2)) $
+                named "conv3" $
+                convolution(#data := act3
+                         .& #kernel := [1,1]
+                         .& #num_filter := num_filter
+                         .& #stride    := [1,1]
+                         .& #pad       := [0,0]
+                         .& #workspace := workspace
+                         .& #no_bias   := True .& Nil)
         shortcut <-
             if dim_match
             then return dat
-            else named (sformat ("conv" % int) (conv_id + 3)) $
+            else -- named (sformat ("conv" % int) (conv_id + 3)) $
+                 named "downsample" $
                  convolution (#data       := act1
                            .& #kernel     := [1,1]
                            .& #num_filter := num_filter
@@ -301,17 +306,20 @@ residual (conv_id, bn_id) args = do
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
 
-        plus (#lhs := conv3 .& #rhs := shortcut .& Nil)
+        named "plus" $ plus (#lhs := conv3 .& #rhs := shortcut .& Nil)
 
       else do
-        bn1  <- named (sformat ("batchnorm" % int) bn_id) $
+        bn1  <- -- named (sformat ("batchnorm" % int) bn_id) $
+                named "bn1" $
                 batchnorm    (#data      := dat
                            .& #eps       := eps
                            .& #momentum  := bn_mom
                            .& #fix_gamma := False .& Nil)
-        act1 <- activation   (#data      := bn1
+        act1 <- unique' $
+                activation   (#data      := bn1
                            .& #act_type  := #relu .& Nil)
-        conv1<- named (sformat ("conv" % int) conv_id) $
+        conv1<- --named (sformat ("conv" % int) conv_id) $
+                named "conv1" $
                 convolution  (#data      := act1
                            .& #kernel    := [3,3]
                            .& #num_filter:= num_filter
@@ -320,15 +328,18 @@ residual (conv_id, bn_id) args = do
                            .& #workspace := workspace
                            .& #no_bias   := True .& Nil)
 
-        bn2   <- named (sformat ("batchnorm" % int) (bn_id + 1)) $
-                 batchnorm   (#data      := conv1
+        bn2  <- --named (sformat ("batchnorm" % int) (bn_id + 1)) $
+                named "bn2" $
+                batchnorm    (#data      := conv1
                            .& #eps       := eps
                            .& #momentum  := bn_mom
                            .& #fix_gamma := False .& Nil)
-        act2  <- activation  (#data      := bn2
+        act2 <- unique' $
+                activation  (#data      := bn2
                                            .& #act_type  := #relu .& Nil)
-        conv2 <- named (sformat ("conv" % int) (conv_id + 1)) $
-                 convolution (#data      := act2
+        conv2<- --named (sformat ("conv" % int) (conv_id + 1)) $
+                named "conv2" $
+                convolution  (#data      := act2
                            .& #kernel    := [3,3]
                            .& #num_filter:= num_filter
                            .& #stride    := [1,1]
@@ -338,7 +349,8 @@ residual (conv_id, bn_id) args = do
         shortcut <-
             if dim_match
             then return dat
-            else named (sformat ("conv" % int) (conv_id + 2)) $
+            else -- named (sformat ("conv" % int) (conv_id + 2)) $
+                 named "downsample" $
                  convolution (#data      := act1
                            .& #kernel    := [1,1]
                            .& #num_filter:= num_filter
@@ -348,5 +360,5 @@ residual (conv_id, bn_id) args = do
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
 
-        plus (#lhs := conv2 .& #rhs := shortcut .& Nil)
+        named "plus" $ plus (#lhs := conv2 .& #rhs := shortcut .& Nil)
 

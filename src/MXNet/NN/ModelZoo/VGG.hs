@@ -1,29 +1,11 @@
-{-# language ViewPatterns #-}
+{-# LANGUAGE ViewPatterns #-}
 module MXNet.NN.ModelZoo.VGG where
 
-import RIO
-import RIO.Prelude (lift)
-import RIO.List (sort, zip3, lastMaybe)
-import qualified RIO.Text as T
-import qualified Data.Text.Read as T (decimal)
-import qualified RIO.State as ST
-import Formatting
+import           RIO
+import           RIO.List       (scanl, zip3)
 
-import MXNet.Base
-import MXNet.NN.Layer
-
-opWithID op args = do
-    n <- ST.get
-    ST.put (n+1)
-    lift $ op (sformat ("features." % int) n) args
-
-lastID sym = do
-    names <- listArguments sym
-    let ids = catMaybes [ignore $ T.decimal x | (T.split (=='.') -> _: x: _: _) <- names]
-    return $ fromMaybe 0 $ lastMaybe $ sort ids
-  where
-    ignore :: Either String (Int, T.Text) -> Maybe Int
-    ignore = either (const Nothing) (Just . fst)
+import           MXNet.Base
+import           MXNet.NN.Layer
 
 {-
 VGG(
@@ -71,56 +53,56 @@ VGG(
  -}
 
 
-getFeature :: SymbolHandle -> [Int] -> [Int] -> Bool -> Bool -> IO (SymbolHandle, SymbolHandle -> IO SymbolHandle)
-getFeature internalLayer layers filters with_batch_norm with_last_pooling = flip ST.evalStateT (0::Int) $ do
-    sym <- foldM build1 internalLayer specs
+getFeature :: SymbolHandle -> [Int] -> [Int] -> Bool -> Bool -> Layer SymbolHandle
+getFeature dat layers filters with_batch_norm with_last_pooling = do
+    sym <- foldM build1 dat specs
     -- inlining the build1 below, and omit pooling depending on the with_last_pooling
     case last_group of
         (idx, num, filter) -> do
-            sym <- foldM (build2 idx) sym $ zip [1::Int ..] (replicate num filter)
-            vid <- ST.get
-            sym <- if not with_last_pooling
-                then return sym
-                else opWithID pooling (#data := sym .& #pool_type := #max .& #kernel := [2,2] .& #stride := [2,2] .& Nil)
-            return (sym, getTopFeature (vid + 1))
+            sym <- foldM build2 sym $ zip [idx..] $ replicate num filter
+            if not with_last_pooling
+            then return sym
+            else pooling (#data := sym
+                       .& #pool_type := #max
+                       .& #kernel := [2,2]
+                       .& #stride := [2,2] .& Nil)
 
   where
-    last_group:groups = reverse $ zip3 [1::Int ..] layers filters
+    idxes = scanl (+) 0 layers
+    last_group:groups = reverse $ zip3 idxes layers filters
     specs = reverse groups
 
-    -- idx was used to make unique names. and becomes deprecated
     build1 sym (idx, num, filter) = do
-        sym <- foldM (build2 idx) sym $ zip [1::Int ..] (replicate num filter)
-        opWithID pooling (#data := sym .& #pool_type := #max .& #kernel := [2,2] .& #stride := [2,2] .& Nil)
+        sym <- foldM build2 sym $ zip [idx..] $ replicate num filter
+        pooling (#data := sym
+              .& #pool_type := #max
+              .& #kernel := [2,2]
+              .& #stride := [2,2] .& Nil)
 
-    -- idx1, idx2 were used to make unique names. and becomes deprecated
-    build2 idx1 sym (idx2, filter) = do
-        sym <- opWithID convolution (#data := sym .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := filter .& #workspace := 2048 .& Nil)
-        sym <- if with_batch_norm then opWithID batchnorm (#data := sym .& Nil) else return sym
-        opWithID activation (#data := sym .& #act_type := #relu .& Nil)
+    build2 sym (idx, filter) = do
+        sym <- convolution (#data := sym
+                         .& #kernel := [3,3]
+                         .& #pad := [1,1]
+                         .& #num_filter := filter
+                         .& #workspace := 2048 .& Nil)
+        sym <- if with_batch_norm
+                  then batchnorm (#data := sym .& Nil)
+                  else return sym
+        activation (#data := sym .& #act_type := #relu .& Nil)
 
-getTopFeature :: Int -> SymbolHandle -> IO SymbolHandle
-getTopFeature sid input = do
-    flip ST.evalStateT sid $ do
-        vid <- ST.get
-        sym <- lift $ flatten (sformat ("features." % int % ".flatten") vid) (#data := input .& Nil)
-        sym <- opWithID fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
-        sym <- lift $ activation (sformat ("features." % int % ".activation") vid) (#data := sym .& #act_type := #relu .& Nil)
-        sym <- opWithID dropout (#data := sym .& #p := 0.5 .& Nil)
-        vid <- ST.get
-        sym <- opWithID fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
-        sym <- lift $ activation (sformat ("features." % int % ".activation") vid) (#data := sym .& #act_type := #relu .& Nil)
-        opWithID dropout (#data := sym .& #p := 0.5 .& Nil)
+getTopFeature :: SymbolHandle -> Layer SymbolHandle
+getTopFeature input = do
+    sym <- unique' $ flatten (#data := input .& Nil)
+    sym <- fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
+    -- sym <- activation (#data := sym .& #act_type := #relu .& Nil)
+    sym <- dropout (#data := sym .& #p := 0.5 .& Nil)
+    sym <- fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
+    -- sym <- activation (#data := sym .& #act_type := #relu .& Nil)
+    dropout (#data := sym .& #p := 0.5 .& Nil)
 
-symbol :: Int -> Int -> Bool -> IO (Symbol Float)
-symbol num_classes num_layers with_batch_norm = do
-    sym <- variable "data"
-    (sym, makeTop) <- getFeature sym layers filters with_batch_norm True
-    sym <- makeTop sym
-    sym <- fullyConnected "output" (#data := sym .& #num_hidden := num_classes .& Nil)
-    sym <- softmaxoutput "softmax" (#data := sym .& Nil)
-    return (Symbol sym)
-
+symbol :: SymbolHandle -> Int -> Bool -> Layer SymbolHandle
+symbol dat num_layers with_batch_norm =
+    getFeature dat layers filters with_batch_norm True >>= getTopFeature
   where
     (layers, filters) = case num_layers of
                             11 -> ([1, 1, 2, 2, 2], [64, 128, 256, 512, 512])
@@ -128,3 +110,6 @@ symbol num_classes num_layers with_batch_norm = do
                             16 -> ([2, 2, 3, 3, 3], [64, 128, 256, 512, 512])
                             19 -> ([2, 2, 4, 4, 4], [64, 128, 256, 512, 512])
 
+vgg16 dat num_classes = do
+    sym <- sequential "features" $ symbol dat 16 False
+    named "output" $ fullyConnected (#data := sym .& #num_hidden := num_classes .& Nil)
