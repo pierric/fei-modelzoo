@@ -17,13 +17,13 @@ import qualified RIO.Vector.Unboxed           as UV
 import           MXNet.Base
 import qualified MXNet.Base.NDArray           as A
 import           MXNet.Base.Operators.NDArray (argmax, argmax_channel)
-import           MXNet.Base.Operators.Symbol  (add_n, clip,
-                                               repeat, sigmoid, slice_axis,
-                                               smooth_l1, transpose, _Custom,
-                                               _MakeLoss, _arange,
+import           MXNet.Base.Operators.Symbol  (add_n, clip, repeat, sigmoid,
+                                               slice_axis, smooth_l1, transpose,
+                                               _Custom, _MakeLoss, _arange,
+                                               _contrib_AdaptiveAvgPooling2D,
                                                _contrib_ROIAlign,
                                                _contrib_box_decode,
-                                               _contrib_box_nms)
+                                               _contrib_box_nms, _ones, _zeros)
 import           MXNet.NN.EvalMetric
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
@@ -40,35 +40,36 @@ data Backbone = VGG16
     deriving (Show, Read, Eq)
 
 data RcnnConfiguration = RcnnConfiguration
-    { rpn_anchor_scales   :: [Int]
-    , rpn_anchor_ratios   :: [Float]
+    { rpn_anchor_scales    :: [Int]
+    , rpn_anchor_ratios    :: [Float]
+    , rpn_anchor_base_size :: Int
     -- , rpn_feature_stride  :: Int
-    , rpn_batch_rois      :: Int
-    , rpn_pre_topk        :: Int
-    , rpn_post_topk       :: Int
-    , rpn_nms_thresh      :: Float
-    , rpn_min_size        :: Int
-    , rpn_fg_fraction     :: Float
-    , rpn_fg_overlap      :: Float
-    , rpn_bg_overlap      :: Float
-    , rpn_allowd_border   :: Int
-    , rcnn_num_classes    :: Int
-    , rcnn_feature_stride :: [Int]
-    , rcnn_pooled_size    :: [Int]
-    , rcnn_batch_rois     :: Int
-    , rcnn_batch_size     :: Int
-    , rcnn_fg_fraction    :: Float
-    , rcnn_fg_overlap     :: Float
+    , rpn_batch_rois       :: Int
+    , rpn_pre_topk         :: Int
+    , rpn_post_topk        :: Int
+    , rpn_nms_thresh       :: Float
+    , rpn_min_size         :: Int
+    , rpn_fg_fraction      :: Float
+    , rpn_fg_overlap       :: Float
+    , rpn_bg_overlap       :: Float
+    , rpn_allowd_border    :: Int
+    , rcnn_num_classes     :: Int
+    , rcnn_pooled_size     :: [Int]
+    , rcnn_batch_rois      :: Int
+    , rcnn_fg_fraction     :: Float
+    , rcnn_fg_overlap      :: Float
     -- , rcnn_bbox_stds      :: [Float]
-    , rcnn_max_num_gt     :: Int
-    , pretrained_weights  :: String
-    , backbone            :: Backbone
+    , rcnn_max_num_gt      :: Int
+    , feature_strides      :: [Int]
+    , batch_size           :: Int
+    , pretrained_weights   :: String
+    , backbone             :: Backbone
     }
     deriving Show
 
 stageList :: Backbone -> [Int]
 stageList RESNET50FPN = [2..5]
-stageList _           = []
+stageList _           = [3]
 
 resnet50Args = (#num_stages := 4
              .& #filter_list := [64, 256, 512, 1024, 2048]
@@ -90,6 +91,7 @@ features1 RESNET50  dat = fmap (:| []) $ Resnet.getFeature dat resnet50Args
 features1 RESNET101 dat = fmap (:| []) $ Resnet.getFeature dat resnet101Args
 features1 RESNET50FPN dat = do
     sym <- Resnet.getFeature dat resnet50Args
+    sym <- Resnet.getTopFeature sym resnet50Args
     fpnFeatureExpander sym
         [ ("features.5.2.plus_output", 256)
         , ("features.6.3.plus_output", 256)
@@ -106,72 +108,50 @@ rpn :: RcnnConfiguration
     -> NonEmpty SymbolHandle -> SymbolHandle
     -> Layer (SymbolHandle, SymbolHandle, SymbolHandle, SymbolHandle)
 rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
-    case convFeats of
-      [convFeat] -> do
-          let conv3x3_feat x = named "rpn_conv_3x3" $
-                               convolution (#kernel := [3,3]
-                                         .& #pad := [1,1]
-                                         .& #num_filter := 512 .& Nil)
-              conv1x1_cls  x = named "rpn_cls_score" $
-                               convolution (#data := x
-                                         .& #kernel := [1,1]
-                                         .& #pad := [0,0]
-                                         .& #num_filter := num_variation .& Nil)
-              conv1x1_reg  x = named "rpn_bbox_pred" $
-                               convolution (#data := x
-                                         .& #kernel := [1,1]
-                                         .& #pad := [0,0]
-                                         .& #num_filter := 4 * num_variation .& Nil)
-          (rpn_pre, rpn_raw_score, rpn_raw_boxreg) <- rpn_head conv3x3_feat conv1x1_cls conv1x1_reg convFeat
+    conv3x3_feat <- named "rpn_conv_3x3" $
+                    convolutionShared (#kernel := [3,3]
+                                    .& #pad := [1,1]
+                                    .& #num_filter := 512 .& Nil)
+    conv1x1_cls  <- named "rpn_cls_score" $
+                    convolutionShared (#kernel := [1,1]
+                                    .& #pad := [0,0]
+                                    .& #num_filter := num_variation .& Nil)
+    conv1x1_reg  <- named "rpn_bbox_pred" $
+                    convolutionShared (#kernel := [1,1]
+                                    .& #pad := [0,0]
+                                    .& #num_filter := 4 * num_variation .& Nil)
+    layers <- zipWithM (rpn_head conv3x3_feat conv1x1_cls conv1x1_reg) (NE.toList convFeats) feature_strides
 
-          (rpn_roi_score, rpn_roi_box) <- nms rpn_pre
-          return (rpn_roi_score, rpn_roi_box, rpn_raw_score, rpn_raw_boxreg)
+    let (rpn_pres, rpn_raw_scores, rpn_raw_boxregs) = unzip3 layers
+    -- concat the list of RPN ROI boxes, in which boxes are decoded, and suppressed items are -1s
+    -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 5)
+    rpn_pres        <- concat_ 1 rpn_pres
+    -- concat the list of RPN raw scores of all predictions,
+    -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 1)
+    rpn_raw_scores  <- concat_ 1 rpn_raw_scores
+    -- concat the list of RPN raw box regression of all predictions,
+    -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 4)
+    rpn_raw_boxregs <- concat_ 1 rpn_raw_boxregs
 
-      _ -> do
-          conv3x3_feat <- named "rpn_conv_3x3" $
-                          convolutionShared (#kernel := [3,3]
-                                          .& #pad := [1,1]
-                                          .& #num_filter := 512 .& Nil)
-          conv1x1_cls  <- named "rpn_cls_score" $
-                          convolutionShared (#kernel := [1,1]
-                                          .& #pad := [0,0]
-                                          .& #num_filter := num_variation .& Nil)
-          conv1x1_reg  <- named "rpn_bbox_pred" $
-                          convolutionShared (#kernel := [1,1]
-                                          .& #pad := [0,0]
-                                          .& #num_filter := 4 * num_variation .& Nil)
-          layers <- forM convFeats $ rpn_head conv3x3_feat conv1x1_reg conv1x1_reg
+    -- non-maximum suppress the rois, and split the score and box part
+    (rpn_roi_scores, rpn_roi_boxes) <- nms rpn_pres
 
-          let (rpn_pres, rpn_raw_scores, rpn_raw_boxregs) = unzip3 $ NE.toList layers
-          -- concat the list of RPN ROI boxes, in which boxes are decoded, and suppressed items are -1s
-          -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 5)
-          rpn_pres        <- concat_ 1 rpn_pres
-          -- concat the list of RPN raw scores of all predictions,
-          -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 1)
-          rpn_raw_scores  <- concat_ 1 rpn_raw_scores
-          -- concat the list of RPN raw box regression of all predictions,
-          -- result shape: (batch_size, Σ(feat_H_i*feat_W_i*num_variation), 4)
-          rpn_raw_boxregs <- concat_ 1 rpn_raw_boxregs
-
-          -- non-maximum suppress the rois, and split the score and box part
-          (rpn_roi_scores, rpn_roi_boxes) <- nms rpn_pres
-
-          return (rpn_roi_scores, rpn_roi_boxes, rpn_raw_scores, rpn_raw_boxregs)
+    return (rpn_roi_scores, rpn_roi_boxes, rpn_raw_scores, rpn_raw_boxregs)
 
     where
         num_variation = length rpn_anchor_scales * length rpn_anchor_ratios
-        rpn_head conv3x3_feat conv1x1_cls conv1x1_reg feat = do
+        rpn_head conv3x3_feat conv1x1_cls conv1x1_reg feat stride = do
             x <- conv3x3_feat feat
             x <- activation (#data := x
                           .& #act_type := #relu .& Nil)
 
             anchors <- prim _Custom (#op_type := "anchor_generator"
-                                  .& #data := [x]
-                                  .& #stride :≅ (1 :: Int)
-                                  .& #scale  :≅ rpn_anchor_scales
-                                  .& #ratios :≅ rpn_anchor_ratios
-                                  .& #base_size  :≅ ([32, 32] :: [Int])
-                                  .& #alloc_size :≅ ([128, 128] :: [Int])
+                                  .& #data    := [x]
+                                  .& #stride     :≅ stride
+                                  .& #scales     :≅ rpn_anchor_scales
+                                  .& #ratios     :≅ rpn_anchor_ratios
+                                  .& #base_size  :≅ rpn_anchor_base_size
+                                  .& #alloc_size :≅ ((128, 128) :: (Int, Int))
                                   .& Nil)
 
             rpn_raw_score <- conv1x1_cls x
@@ -195,16 +175,16 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
 
         region_proposer min_size anchors boxregs scores = do
             rois <- prim _contrib_box_decode (#data := boxregs .& #anchors := anchors .& Nil)
-            rois <- prim _Custom (#data := [rois, imInfo] .& #op_type := "bbox_clip_to_image" .& Nil)
-            [xmin, ymin, xmax, ymax] <- splitBySections 4 (-1) False rois
+            (xmin, ymin, xmax, ymax) <- bbox_clip_to_image rois imInfo
             width   <- sub_ xmax xmin >>= addScalar 1
             height  <- sub_ ymax ymin >>= addScalar 1
             invalid <- join $ liftM2 add_ (ltScalar min_size width) (ltScalar min_size height)
             mask    <- onesLike invalid >>= mulScalar (-1)
             scores  <- where_ invalid mask scores
             invalid <- broadcastAxis [2] [4] invalid
+            mask    <- onesLike invalid >>= mulScalar (-1)
             rois    <- where_ invalid mask rois
-            blockGrad =<< concat_ (-1) [scores, rois]
+            blockGrad =<< named "proposals" (concat_ (-1) [scores, rois])
 
         nms rpn_pre = do
             -- rpn_pre shape: (batch_size, num_anchors, 5)
@@ -232,33 +212,61 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
                                             .& #end := Nothing .& Nil)
             return (rpn_roi_scores, rpn_roi_boxes)
 
+        bbox_clip_to_image rois info = do
+            -- rois: (B, N, 4)
+            -- info: (B, 3)
+            -- return: (B,N), (B,N), (B,N), (B,N)
+            [xmin, ymin, xmax, ymax] <- splitBySections 4 (-1) False rois
+            [_, height, width]       <- splitBySections 3 (-1) False info
+            height <- expandDims (-1) height
+            width  <- expandDims (-1) width
+            w_ub <- subScalar 1 width
+            h_ub <- subScalar 1 height
+            z <- zerosLike xmin
+            w <- onesLike xmin >>= mulBroadcast w_ub
+            h <- onesLike xmin >>= mulBroadcast h_ub
+            cond <- ltScalar 0 xmin
+            xmin <- where_ cond z xmin
+            cond <- ltScalar 0 ymin
+            ymin <- where_ cond z ymin
+            cond <- gtBroadcast xmax w_ub
+            xmax <- where_ cond w xmax
+            cond <- gtBroadcast ymax h_ub
+            ymax <- where_ cond h ymax
+            return (xmin, ymin, xmax, ymax)
 
-alignROIs :: NonEmpty SymbolHandle -> SymbolHandle -> [Int] -> [Int] -> [Int] -> Layer SymbolHandle
+alignROIs :: NonEmpty SymbolHandle -> SymbolHandle -> [Int] -> [Int] -> [Int] -> Layer _
 alignROIs features rois stage_indices roi_pooled_size strides = do
+    -- rois: (N, 5), batch_index, min_x, min_y, max_x, max_y
     let min_stage = head stage_indices
         max_stage = last stage_indices
-    [xmin, ymin, xmax, ymax] <- splitBySections 4 (-1) False rois
+    [_, xmin, ymin, xmax, ymax] <- splitBySections 5 (-1) False rois
     w <- xmax `sub_` xmin >>= addScalar 1
     h <- ymax `sub_` ymin >>= addScalar 1
-    roi_level <- w `mul_` h >>=
-                 sqrt_ >>=
-                 divScalar 224 >>=
-                 addScalar 1e-6 >>=
-                 log2_ >>=
-                 addScalar 4 >>=
-                 floor_
-    roi_level <- prim clip (#data := roi_level .& #a_min := fromIntegral min_stage .& #a_max := fromIntegral max_stage .& Nil)
+    -- heuristic to compute the stage where each rois box fits
+    -- bigger box in higher stage
+    -- smaller box in lower stage
+    roi_level_raw <- w `mul_` h >>=
+                     sqrt_ >>=
+                     divScalar 224 >>=
+                     addScalar 1e-6 >>=
+                     log2_ >>=
+                     addScalar 4 >>=
+                     floor_
+    roi_level <- prim clip (#data := roi_level_raw
+                         .& #a_min := fromIntegral min_stage
+                         .& #a_max := fromIntegral max_stage .& Nil)
                  >>= squeeze Nothing
     let align (lvl, feat, stride) = do
             cond <- eqScalar (fromIntegral lvl) roi_level
             omit <- onesLike rois >>= mulScalar (-1)
-            masked <- where_  cond rois omit
+            masked <- where_ cond rois omit
             prim _contrib_ROIAlign (#data := feat
                                  .& #rois := masked
                                  .& #pooled_size := roi_pooled_size
                                  .& #spatial_scale := 1 / fromIntegral stride
                                  .& #sample_ratio := 2 .& Nil)
-    features <- mapM align $ zip3 [min_stage..max_stage] (NE.toList features) strides
+    features <- mapM align $ zip3 [max_stage,max_stage-1..min_stage] (NE.toList features) strides
     prim add_n (#args := features .& Nil)
 
 
@@ -271,15 +279,21 @@ symbolTrain conf@RcnnConfiguration{..} =  do
     -- gt_boxes: (B, M, 5), the last dim: min_x, min_y, max_x, max_y, class_id (background class: 0)
     gt_boxes <- variable "gt_boxes"
     -- box regression mean/std: (4,)
-    box_reg_mean <- variable "bbox_reg_mean"
-    box_reg_std  <- variable "bbox_reg_std"
+    box_reg_mean <- variable "box_reg_mean"
+    box_reg_std  <- variable "box_reg_std"
+    rpn_cls_targets <- variable "rpn_cls_targets"
+    rpn_box_targets <- variable "rpn_box_targets"
+    rpn_box_masks   <- variable "rpn_box_masks"
 
-    gt_labels <- prim slice_axis (#data  := gt_boxes
+    -- box_reg_mean <- unique' $ prim _zeros (#shape := [4] .& #dtype := #float32 .& Nil)
+    -- box_reg_std  <- unique' $ prim _ones  (#shape := [4] .& #dtype := #float32 .& Nil)
+
+    gt_labels <- unique' $ prim slice_axis (#data  := gt_boxes
                                .& #axis  := (-1)
                                .& #begin := 4
                                .& #end   := Nothing .& Nil)
 
-    gt_boxes  <- prim slice_axis (#data  := gt_boxes
+    gt_boxes  <- unique' $ prim slice_axis (#data  := gt_boxes
                                .& #axis  := (-1)
                                .& #begin := 0
                                .& #end   := Just 4 .& Nil)
@@ -290,14 +304,12 @@ symbolTrain conf@RcnnConfiguration{..} =  do
         (rois_scores, roi_boxes, rpn_raw_scores, rpn_raw_boxregs) <- rpn conf feats imInfo
 
         -- total number of ROIs in a batch
-        -- rcnn_batch_size: number of images
+        -- batch_size: number of images
         -- rcnn_batch_rois: number of rois per image
-        let num_sample = rcnn_batch_size * rcnn_batch_rois
-
-        (feat_aligned, samples, matches) <- unique "rcnn" $ do
-            (rois, samples, matches) <- rcnnSampler rcnn_batch_size
+        (feat_aligned, roi_boxes, samples, matches) <- unique "rcnn" $ do
+            (rois_boxes, samples, matches) <- rcnnSampler batch_size
                                                     rpn_post_topk
-                                                    num_sample
+                                                    rcnn_batch_rois
                                                     rcnn_fg_overlap
                                                     rcnn_fg_fraction
                                                     rcnn_max_num_gt
@@ -305,70 +317,108 @@ symbolTrain conf@RcnnConfiguration{..} =  do
                                                     rois_scores
                                                     gt_boxes
 
-            roi_batchid <- prim _arange (#start := 0 .& #stop := Just (fromIntegral rcnn_batch_size) .& Nil)
-            roi_batchid <- prim repeat  (#data := roi_batchid .& #repeats := num_sample .& Nil)
+            roi_batchid <- prim _arange (#start := 0 .& #stop := Just (fromIntegral batch_size) .& Nil)
+            roi_batchid <- prim repeat  (#data := roi_batchid .& #repeats := rcnn_batch_rois .& Nil)
             roi_batchid <- reshape [-1, 1] roi_batchid
-
-            rois <- reshape [-1, 1] rois
+            -- rois: (B * rcnn_batch_rois, 4)
+            rois <- reshape [-1, 4] rois_boxes
             rois <- concat_ 1 [roi_batchid, rois] >>= blockGrad
+            feat <- alignROIs feats rois (stageList backbone) rcnn_pooled_size feature_strides
+            return (feat, rois_boxes, samples, matches)
 
-            feat <- alignROIs feats rois (stageList backbone) rcnn_pooled_size rcnn_feature_stride
-            return (feat, samples, matches)
-
-        topFeat <- features2 backbone feat_aligned
+        -- feat_aligned: (batch_size * rcnn_batch_rois, num_channels, feature_height, feature_width)
+        -- Apply the remaining feature extraction layers
+        top_feat <- features2 backbone feat_aligned
 
         unique "rcnn" $ do
-            (labels, bbox_targets, bbox_weights) <- rcnnTargetGenerator rcnn_batch_size
-                                                                        (rcnn_num_classes-1)
-                                                                        (floor $ rcnn_fg_fraction * fromIntegral num_sample)
-                                                                        samples
-                                                                        matches
-                                                                        roi_boxes
-                                                                        gt_labels
-                                                                        gt_boxes
-                                                                        box_reg_mean
-                                                                        box_reg_std
-            rpn_cls_prob <- softmaxoutput (#data := rpn_raw_scores
-                                        .& #label := labels
-                                        .& #multi_output := True
-                                        .& #normalization := #valid
-                                        .& #use_ignore := True
-                                        .& #ignore_label := -1 .& Nil)
+            (cls_targets, bbox_targets, bbox_masks, positive_indices) <-
+                rcnnTargetGenerator batch_size
+                                    (rcnn_num_classes-1)
+                                    (floor $ rcnn_fg_fraction * fromIntegral rcnn_batch_rois)
+                                    samples
+                                    matches
+                                    roi_boxes
+                                    gt_labels
+                                    gt_boxes
+                                    box_reg_mean
+                                    box_reg_std
 
-            rpn_bbox_reg  <- sub_ rpn_raw_boxregs bbox_targets
+            -- sigmoid + binary-cross-entropy
+            -- rpn_raw_scores: (B, num_rois, 1)
+            -- rpn_cls_targets: (B, num_rois, 1)
+            rpn_cls_prob <- prim sigmoid (#data := rpn_raw_scores .& Nil)
+            a  <- log2_ rpn_cls_prob
+            ra <- rsubScalar 1 a >>= log2_
+            b  <- identity rpn_cls_targets
+            rb <- rsubScalar 1 rpn_cls_targets
+            rpn_cls_loss <- (join $ liftM2 add_ (mul_ a b) (mul_ ra rb)) >>= rsubScalar 0
+
+            -- average number of targets per batch example
+            cls_mask <- geqScalar 0 rpn_cls_targets
+            num_pos_avg  <- sum_ cls_mask Nothing >>= divScalar (fromIntegral batch_size)
+
+            rpn_cls_loss <- mul_ rpn_cls_loss cls_mask >>= flip divBroadcast num_pos_avg
+            rpn_cls_loss <- prim _MakeLoss (#data := rpn_cls_loss .& #grad_scale := 1.0 .& Nil)
+
+            rpn_bbox_reg  <- sub_ rpn_raw_boxregs rpn_box_targets
             rpn_bbox_reg  <- prim smooth_l1 (#data := rpn_bbox_reg .& #scalar := 3.0 .& Nil)
-            rpn_bbox_loss <- mul_ bbox_weights rpn_bbox_reg
+            rpn_bbox_loss <- mul_ rpn_bbox_reg rpn_box_masks >>= flip divBroadcast num_pos_avg
             rpn_bbox_loss <- prim _MakeLoss
-                                (#data := rpn_bbox_loss .& #grad_scale := 1.0 / fromIntegral rpn_batch_rois .& Nil)
+                                (#data := rpn_bbox_loss .& #grad_scale := 1.0 .& Nil)
 
-            cls_score <- named "cls_score" $
-                         fullyConnected (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
-            cls_prob  <- named "cls_prob" $
-                         softmaxoutput (#data := cls_score .& #label := labels .& #normalization := #batch .& Nil)
+            box_feat <- prim _contrib_AdaptiveAvgPooling2D (#data := top_feat .& #output_size := [1, 1] .& Nil)
+
+            -- rcnn class prediction
+            -- cls_score: (batch_size * rcnn_batch_rois, rcnn_num_classes)
+            cls_score <- named "rcnn_cls_score" $
+                         fullyConnected (#data := box_feat .& #num_hidden := rcnn_num_classes .& Nil)
+            cls_score <- reshape [batch_size, rcnn_batch_rois, rcnn_num_classes] cls_score
+
+            cls_prob  <- named "rcnn_cls_prob" $
+                         softmaxoutput (#data := cls_score
+                                     .& #label := cls_targets
+                                     .& #normalization := #batch
+                                     .& #preserve_shape := True
+                                     .& #use_ignore := True
+                                     .& #ignore_label := -1
+                                     .& #grad_scale := 1 / fromIntegral batch_size .& Nil)
 
             ---------------------------
             -- bbox_loss part
             --
-            bbox_pred <- named "bbox_pred" $
-                         fullyConnected (#data := topFeat .& #num_hidden := 4 * rcnn_num_classes .& Nil)
+            bbox_feature <- named "rcnn_bbox_feature" $ fullyConnected (#data := top_feat .& #num_hidden := 1024 .& Nil)
+            bbox_feature <- activation  (#data := bbox_feature .& #act_type := #relu .& Nil)
+            -- bbox_feature: (B * rcnn_batch_rois, num_hidden) ==> (B, rcnn_batch_rois, num_hidden)
+            bbox_feature <- expandDims 0 bbox_feature >>= reshape [batch_size, rcnn_batch_rois, 1024]
+            -- select only feature that has foreground gt for each batch example
+            -- positive_indices: (B, rcnn_fg_fraction * num_sample)
+            bbox_feature <- forM ([0..batch_size-1] :: [_]) $ \i -> do
+                ind <- prim slice_axis (#data := positive_indices
+                                     .& #axis := 0
+                                     .& #begin := i .& #end := Just (i+1) .& Nil)
+                       >>= squeeze Nothing
+                bat <- prim slice_axis (#data := bbox_feature
+                                     .& #axis := 0
+                                     .& #begin := i .& #end := Just (i+1) .& Nil)
+                       >>= squeeze Nothing
+                takeI ind bat
+            bbox_feature <- concat_ 0 bbox_feature
+
+            -- for each foreground ROI, predict boxes (reg) for each foreground class
+            bbox_pred <- named "rcnn_bbox_pred" $
+                         fullyConnected (#data := bbox_feature .& #num_hidden := 4 * (rcnn_num_classes - 1) .& Nil)
+            -- bbox_pred: (B * rcnn_fg_fraction * num_sample, num_fg_classes * 4)
+            --        ==> (B, rcnn_fg_fraction * num_sample, num_fg_classes, 4)
+            bbox_pred <- reshape [batch_size, -1, rcnn_num_classes - 1, 4] bbox_pred
             bbox_reg  <- sub_ bbox_pred bbox_targets
             bbox_reg  <- prim smooth_l1 (#data := bbox_reg .& #scalar := 1.0 .& Nil)
-            bbox_loss <- mul_ bbox_reg bbox_weights
-            bbox_loss <- named "bbox_loss" $
-                         prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 / fromIntegral rcnn_batch_rois .& Nil)
+            bbox_loss <- mul_ bbox_reg bbox_masks
+            bbox_loss <- prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 / fromIntegral rcnn_batch_rois .& Nil)
 
-            label     <- reshape [rcnn_batch_size, -1] labels >>= blockGrad
-            cls_prob  <- reshape [rcnn_batch_size, -1, rcnn_num_classes] cls_prob
-            bbox_loss <- reshape [rcnn_batch_size, -1, 4 * rcnn_num_classes] bbox_loss
+            cls_targets   <- reshape [batch_size, -1] cls_targets >>= blockGrad
+            rpn_cls_prob  <- blockGrad rpn_cls_prob
 
-            -- include topFeatures and clsScores for debug
-            topFeatuSG <- named "topfeatu_sg" $ blockGrad topFeat
-            clsScoreSG <- named "clsscore_sg" $ blockGrad cls_score
-            -- roisSG     <- _BlockGrad "rois_sg"     (#data := rois.& Nil)
-            -- bboxTSG    <- _BlockGrad "bboxT_sg"    (#data := bbox_targets .& Nil)
-            -- bboxWSG    <- _BlockGrad "bboxW_sg"    (#data := bbox_weights .& Nil)
-
-            group [rpn_cls_prob, rpn_bbox_loss, cls_prob, bbox_loss, label, topFeatuSG, clsScoreSG]
+            group $ [rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss, cls_prob, bbox_loss, cls_targets]
 
 
 symbolInfer :: RcnnConfiguration -> Layer SymbolHandle
@@ -410,35 +460,36 @@ symbolInfer conf@RcnnConfiguration{..} = error "no infer"
 --            group [rois, clsProb, bboxPred]
 
 --------------------------------
-data RPNAccMetric a = RPNAccMetric Int Text
+data RPNAccMetric a = RPNAccMetric Text
 
 instance EvalMetricMethod RPNAccMetric where
-    data MetricData RPNAccMetric a = RPNAccMetricData Text Int Text (IORef Int) (IORef Int)
-    newMetric phase (RPNAccMetric oindex label) = do
+    data MetricData RPNAccMetric a = RPNAccMetricData Text Text (IORef Int) (IORef Int)
+    newMetric phase (RPNAccMetric label) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
-        return $ RPNAccMetricData phase oindex label a b
+        return $ RPNAccMetricData phase label a b
 
-    formatMetric (RPNAccMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNAccMetricData _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNAcc: " % fixed 2 % ">") (100 * fromIntegral s / fromIntegral n :: Float)
 
-    evalMetric (RPNAccMetricData phase oindex lname cntRef sumRef) bindings outputs = liftIO $  do
-        let label = bindings ^?! ix lname
-            pred  = outputs  ^?! ix oindex
+    evalMetric (RPNAccMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
+        -- traceShowM "rpnacc"
+        -- rpn class pred: (B, rpn_post_topk, 1)
+        -- rpn class label: (B, rpn_post_topk, 1)
+        pred  <- toRepa @DIM3 (outputs  ^?! ix 0)
+        label <- toRepa @DIM3 (bindings ^?! ix lname)
 
-        pred <- A.makeNDArrayLike pred contextCPU >>= A.copy pred
-        label <- V.convert <$> toVector label
+        let pred_thr = Repa.map (\v -> if v > 0.5 then 1 else 0) pred
+            matches  = Repa.zipWith (\v w -> if v == w then 1 else 0) pred_thr label
+            valid_mask = Repa.map (\v -> if v >= 0 then 1 else 0) label
 
-        [pred_label] <- argmax_channel (#data := unNDArray pred .& Nil)
-        pred_label <- V.convert <$> toVector (NDArray pred_label)
+        num_valid   <- Repa.sumAllP valid_mask
+        num_matches <- Repa.sumAllP matches
 
-        let pairs = V.filter ((/= -1) . fst) $ V.zip label pred_label
-            equal = V.filter (uncurry (==)) pairs
-
-        modifyIORef' sumRef (+ length equal)
-        modifyIORef' cntRef (+ length pairs)
+        modifyIORef' sumRef (+ num_matches)
+        modifyIORef' cntRef (+ num_valid)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -446,111 +497,77 @@ instance EvalMetricMethod RPNAccMetric where
         return $ M.singleton (phase `T.append` "_acc") acc
 
 
-data RCNNAccMetric a = RCNNAccMetric Int Int
+data RCNNAccMetric a = RCNNAccMetric
 
 instance EvalMetricMethod RCNNAccMetric where
     data MetricData RCNNAccMetric a = RCNNAccMetricData {
         _rcnn_acc_phase :: Text,
-        _rcnn_acc_cindex :: Int,
-        _rcnn_acc_lindex :: Int,
-        _rcnn_acc_all :: IORef (Int, Int),
         _rcnn_acc_fg  :: IORef (Int, Int)
     }
-    newMetric phase (RCNNAccMetric cindex lindex) = do
+    newMetric phase RCNNAccMetric = do
         a <- liftIO $ newIORef (0, 0)
-        b <- liftIO $ newIORef (0, 0)
-        return $ RCNNAccMetricData phase cindex lindex a b
+        return $ RCNNAccMetricData phase a
 
-    formatMetric (RCNNAccMetricData _ _ _ accum_all accum_fg) = liftIO $ do
-        (all_s, all_n) <- liftIO $ readIORef accum_all
+    formatMetric (RCNNAccMetricData _ accum_fg) = liftIO $ do
         (fg_s, fg_n)   <- liftIO $ readIORef accum_fg
-        return $ sformat ("<RCNNAcc: " % fixed 2 % " " % fixed 2 % ">")
-            (100 * fromIntegral all_s / fromIntegral all_n :: Float)
+        return $ sformat ("<RCNNAcc: " % fixed 2 % ">")
             (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
 
     evalMetric rcnn_acc _ outputs = liftIO $  do
-        -- cls_prob: (batch_size, #num_anchors*feat_w*feat_h, #num_classes)
-        -- label:    (batch_size, #num_anchors*feat_w*feat_h)
-        let cls_prob = outputs ^?! ix (_rcnn_acc_cindex rcnn_acc)
-            label    = outputs ^?! ix (_rcnn_acc_lindex rcnn_acc)
+        -- traceShowM "rcnnacc"
+        -- cls_prob: (B, num_pos_rois, rcnn_num_classes)
+        -- label:    (B, num_pos_rois)
+        let cls_prob = outputs ^?! ix 3
 
-        cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
-        [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
+        label <- toRepa @DIM2 (outputs ^?! ix 5)
+        cls_prob   <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
+        pred_class <- sing argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
+        pred_class <- toRepa @DIM2 (NDArray pred_class :: NDArray a)
 
-        -- -- debug only
-        -- s1 <- ndshape (NDArray pred_class :: NDArray Float)
-        -- v1 <- toVector (NDArray pred_class :: NDArray Float)
-        -- print (s1, SV.map floor v1 :: SV.Vector Int)
+        num_matches <- Repa.sumAllP $ Repa.zipWith (\v w -> if v == w then 1 else 0) pred_class label
+        num_fg  <- Repa.sumAllP $ Repa.map (\v -> if v >  0 then 1 else 0) label
 
-        -- s1 <- ndshape label
-        -- v1 <- toVector label
-        -- print (s1, SV.map floor v1 :: SV.Vector Int)
+        let ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
+        modifyIORef' ref_acc_fg  (bimap (+ num_matches) (+ num_fg))
 
-        pred_class <- toRepa @DIM2 (NDArray pred_class)
-        label <- toRepa @DIM2 label
-
-        let pairs_all = UV.zip (Repa.toUnboxed label) (Repa.toUnboxed pred_class)
-            equal_all = UV.filter (uncurry (==)) pairs_all
-
-            pairs_fg  = UV.filter ((>0) . fst) pairs_all
-            equal_fg  = UV.filter (uncurry (==)) pairs_fg
-
-        -- print (UV.map (bimap floor floor) pairs_fg :: UV.Vector (Int, Int))
-
-        let ref_acc_all = _rcnn_acc_all rcnn_acc
-            ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
-        modifyIORef' ref_acc_all (bimap (+ UV.length equal_all) (+ UV.length pairs_all))
-        modifyIORef' ref_acc_fg  (bimap (+ UV.length equal_fg)  (+ UV.length pairs_fg))
-
-        (all_s, all_n) <- readIORef ref_acc_all
         (fg_s,  fg_n)  <- readIORef ref_acc_fg
-        let all_acc = fromIntegral all_s / fromIntegral all_n
-            fg_acc  = fromIntegral fg_s  / fromIntegral fg_n
+        let fg_acc  = fromIntegral fg_s  / fromIntegral fg_n
             phase   = _rcnn_acc_phase rcnn_acc
-        return $ M.fromList [
-            (phase `T.append` "_with_bg_acc", all_acc),
-            (phase `T.append` "_fg_only_acc", fg_acc)]
+        return $ M.fromList [(phase `T.append` "_acc", fg_acc)]
 
-data RPNLogLossMetric a = RPNLogLossMetric Int Text
+data RPNLogLossMetric a = RPNLogLossMetric Text
 
 instance EvalMetricMethod RPNLogLossMetric where
-    data MetricData RPNLogLossMetric a = RPNLogLossMetricData Text Int Text (IORef Int) (IORef Double)
-    newMetric phase (RPNLogLossMetric cindex lname) = do
+    data MetricData RPNLogLossMetric a = RPNLogLossMetricData Text Text (IORef Int) (IORef Double)
+    newMetric phase (RPNLogLossMetric lname) = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
-        return $ RPNLogLossMetricData phase cindex lname a b
+        return $ RPNLogLossMetricData phase lname a b
 
-    formatMetric (RPNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNLogLossMetricData _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evalMetric (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
-        let cls_prob = outputs  ^?! ix cindex
-            label    = bindings ^?! ix lname
+    evalMetric (RPNLogLossMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
+        -- traceShowM "rpnlogloss"
+        let pred  = outputs  ^?! ix 0
+            label = bindings ^?! ix lname
 
-        -- (batch_size, #num_anchors*feat_w*feat_h) to (batch_size*#num_anchors*feat_w*feat_h,)
+        -- both pred and label: (B, rpn_post_topk, 1)
         label <- A.reshape label [-1]
         label <- toRepa @DIM1 label
+        pred  <- A.reshape pred [-1]
+        pred  <- toRepa @DIM1 pred
+
         let Z :. size = Repa.extent label
+            ep = constant (Z :. size) 1e-14
+            one = constant (Z :. size) 1
 
-        -- (batch_size, #channel, #num_anchors*feat_w, feat_h) to (batch_size, #channel, #num_anchors*feat_w*feat_h)
-        -- to (batch_size, #num_anchors*feat_w*feat_h, #channel) to (batch_size*#num_anchors*feat_w*feat_h, #channel)
-        cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
-        pred  <- A.reshape cls_prob [0, 0, -1] >>= flip A.transpose [0, 2, 1] >>= flip A.reshape [size, -1]
-        pred  <- toRepa @DIM2 pred
-
-        -- mark out labels where value -1
-        let mask = Repa.computeUnboxedS $ Repa.map (/= -1) label
-
-        pred  <- Repa.selectP
-                    (mask ^#!)
-                    (\i -> let cls = floor (label ^#! i)
-                           in pred ^?! ixr (Z :. i :. cls))
-                    size
-
-        let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
-        cls_loss_val <- realToFrac <$> Repa.sumAllP pred_with_ep
+        let a = Repa.map log (pred Repa.+^ ep) Repa.*^ label
+            b = Repa.map log (one Repa.-^ pred Repa.+^ ep) Repa.*^ (one Repa.-^ label)
+            ce = Repa.map (0-) $ a Repa.+^ b
+        cls_loss_val <- realToFrac <$> Repa.sumAllP ce
         modifyIORef' sumRef (+ cls_loss_val)
         modifyIORef' cntRef (+ size)
 
@@ -559,90 +576,110 @@ instance EvalMetricMethod RPNLogLossMetric where
         let acc = s / fromIntegral n
         return $ M.singleton (phase `T.append` "_acc") acc
 
-data RCNNLogLossMetric a = RCNNLogLossMetric Int Int
+data RCNNLogLossMetric a = RCNNLogLossMetric
 
 instance EvalMetricMethod RCNNLogLossMetric where
-    data MetricData RCNNLogLossMetric a = RCNNLogLossMetricData Text Int Int (IORef Int) (IORef Double)
-    newMetric phase (RCNNLogLossMetric cindex lindex) = do
+    data MetricData RCNNLogLossMetric a = RCNNLogLossMetricData Text (IORef Int) (IORef Double)
+    newMetric phase RCNNLogLossMetric = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
-        return $ RCNNLogLossMetricData phase cindex lindex a b
+        return $ RCNNLogLossMetricData phase a b
 
-    formatMetric (RCNNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RCNNLogLossMetricData _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evalMetric (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) _ outputs = liftIO $  do
-        cls_prob <- toRepa @DIM3 (outputs ^?! ix cindex)
-        label    <- toRepa @DIM2 (outputs ^?! ix lindex)
+    evalMetric (RCNNLogLossMetricData phase cntRef sumRef) _ outputs = liftIO $  do
+        -- traceShowM "rcnnlogloss"
+        -- rcnn class prediction: (B, rcnn_batch_rois, num_fg_classes+1)
+        cls_prob <- toRepa @DIM3 (outputs ^?! ix 3)
+        -- rcnn generated class target: (B, rcnn_batch_rois), value [0, num_fg_classes] or -1
+        label    <- toRepa @DIM2 (outputs ^?! ix 5)
 
-        let lbl_shp@(Z :. _ :. num_lbl) = Repa.extent label
-            cls = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
-                    cls_prob Repa.! (Z :. bi :. ai :. (floor $ label Repa.! pos)))
+        let lbl_shp@(Z :. _ :. num_rois) = Repa.extent label
+            ce = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
+                    let target = floor $ label Repa.! pos
+                        prob   = cls_prob Repa.! (Z :. bi :. ai :. target)
+                        eps    = 1e-14
+                     in if target == -1 then 0 else - log (eps + prob))
 
-        cls_loss_val <- Repa.sumAllP $ Repa.map (\v -> - log(1e-14 + v)) cls
-        -- traceShowM cls_loss_val
-        modifyIORef' sumRef (+ realToFrac cls_loss_val)
-        modifyIORef' cntRef (+ num_lbl)
+        ce <- Repa.sumAllP ce
+        num_valid <- Repa.sumAllP $ Repa.map (\v -> if v == -1 then 0 else 1) label
+        modifyIORef' sumRef (+ realToFrac ce)
+        modifyIORef' cntRef (+ num_valid)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
         return $ M.singleton (phase `T.append` "_acc") acc
 
-data RPNL1LossMetric a = RPNL1LossMetric Int Text
+data RPNL1LossMetric a = RPNL1LossMetric
 
 instance EvalMetricMethod RPNL1LossMetric where
-    data MetricData RPNL1LossMetric a = RPNL1LossMetricData Text Int Text (IORef Int) (IORef Double)
-    newMetric phase (RPNL1LossMetric bindex blabel) = do
+    data MetricData RPNL1LossMetric a = RPNL1LossMetricData Text (IORef Int) (IORef Double)
+    newMetric phase RPNL1LossMetric = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
-        return $ RPNL1LossMetricData phase bindex blabel a b
+        return $ RPNL1LossMetricData phase a b
 
-    formatMetric (RPNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RPNL1LossMetricData _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
         return $ sformat ("<RPNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evalMetric (RPNL1LossMetricData phase bindex blabel cntRef sumRef) bindings outputs = liftIO $  do
-        bbox_loss   <- toRepa @DIM4 (outputs ^?! ix bindex)
-        all_loss    <- Repa.sumAllP bbox_loss
-
-        bbox_weight <- toRepa @DIM4 (bindings ^?! ix blabel)
-        all_pos_weight <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) bbox_weight
+    evalMetric (RPNL1LossMetricData phase cntRef sumRef) bindings outputs = liftIO $  do
+        -- traceShowM "rpnl1loss"
+        bbox_loss <- toRepa @DIM3 (outputs ^?! ix 2)
+        all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
+        let Z:.batch_size:._:._ = Repa.extent bbox_loss
 
         modifyIORef' sumRef (+ realToFrac all_loss)
-        modifyIORef' cntRef (+ (all_pos_weight `div` 4))
+        modifyIORef' cntRef (+ batch_size)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
         let acc = s / fromIntegral n
         return $ M.singleton (phase `T.append` "_acc") acc
 
-data RCNNL1LossMetric a = RCNNL1LossMetric Int Int
+data RCNNL1LossMetric a = RCNNL1LossMetric
 
 instance EvalMetricMethod RCNNL1LossMetric where
-    data MetricData RCNNL1LossMetric a = RCNNL1LossMetricData Text Int Int (IORef Int) (IORef Double)
-    newMetric phase (RCNNL1LossMetric bindex lindex) = do
+    data MetricData RCNNL1LossMetric a = RCNNL1LossMetricData Text (IORef Int) (IORef Double)
+    newMetric phase RCNNL1LossMetric = do
         a <- liftIO $ newIORef 0
         b <- liftIO $ newIORef 0
-        return $ RCNNL1LossMetricData phase bindex lindex a b
+        return $ RCNNL1LossMetricData phase a b
 
-    formatMetric (RCNNL1LossMetricData _ _ _ cntRef sumRef) = liftIO $ do
+    formatMetric (RCNNL1LossMetricData _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RCNNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
+        return $ sformat ("<RCNNL1Loss: " % fixed 5 % ">") (realToFrac s / fromIntegral n :: Float)
 
-    evalMetric (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) _ outputs = liftIO $ do
-        bbox_loss <- toRepa @DIM3 (outputs ^?! ix bindex)
-        all_loss  <- Repa.sumAllP bbox_loss
+    evalMetric (RCNNL1LossMetricData phase cntRef sumRef) _ outputs = liftIO $ do
+        -- traceShowM "rcnnlogloss"
+        -- rcnn box loss: (B, num_pos_rois, num_fg_classes, 4)
 
-        label     <- toRepa @DIM2 (outputs ^?! ix lindex)
-        all_pos   <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) label
+        -- bbox_masks <- toRepa @DIM4 (outputs ^?! ix 6)
+        -- let ind = Repa.fromFunction (Z:.64 :: DIM1) (\(Z:.i) ->
+        --             let ind = Repa.slice bbox_masks (Z:.(0::Int):.i:.Repa.All:.(0::Int))
+        --             in case UV.findIndex (==1) $ Repa.toUnboxed $ Repa.computeUnboxedS ind of
+        --                  Just n  -> n
+        --                  Nothing -> -1)
+        -- traceShowM (Repa.computeUnboxedS ind)
+        -- cnt <- Repa.sumAllP $ Repa.map (\v -> if v > 0 then 1 else 0::Int) bbox_masks
+        -- traceShowM cnt
+
+        -- bbox_preds <- toRepa @DIM4 (outputs ^?! ix 7)
+        -- traceShowM $ Repa.computeUnboxedS $ Repa.slice bbox_preds (Z:.(0::Int):.(0::Int):.Repa.All:.Repa.All)
+
+        bbox_loss <- toRepa @DIM4 (outputs ^?! ix 4)
+        all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
+
+        let Z:.batch_size:.num_pos_rois:._:._ = Repa.extent bbox_loss
 
         modifyIORef' sumRef (+ realToFrac all_loss)
-        modifyIORef' cntRef (+ all_pos)
+        modifyIORef' cntRef (+ batch_size * num_pos_rois)
 
         s <- readIORef sumRef
         n <- readIORef cntRef

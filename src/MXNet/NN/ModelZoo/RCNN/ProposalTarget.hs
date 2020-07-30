@@ -1,31 +1,31 @@
 module MXNet.NN.ModelZoo.RCNN.ProposalTarget where
 
-import RIO
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Boxed.Unsafe as V
-import qualified RIO.Vector.Unboxed as UV
-import qualified Data.Vector.Unboxed.Mutable as UVM
-import qualified Data.Array.Repa as Repa
-import Data.Array.Repa (Array, U, D)
-import Data.Array.Repa.Index
-import Data.Random (shuffle, runRVar, StdRandom(..))
-import Data.Random.Vector (randomElement)
-import Control.Lens (makeLenses)
+import           Control.Lens                 (makeLenses)
+import           Data.Array.Repa              (Array, D, U)
+import qualified Data.Array.Repa              as Repa
+import           Data.Array.Repa.Index
+import           Data.Random                  (StdRandom (..), runRVar, shuffle)
+import           Data.Random.Vector           (randomElement)
+import qualified Data.Vector.Unboxed.Mutable  as UVM
+import           RIO
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Boxed.Unsafe      as V
+import qualified RIO.Vector.Unboxed           as UV
 
-import MXNet.Base
-import MXNet.Base.Operators.NDArray (_set_value_upd)
-import MXNet.NN.Utils.Repa
-import MXNet.NN.ModelZoo.Utils.Box
+import           MXNet.Base
+import           MXNet.Base.Operators.NDArray (_set_value_upd)
+import           MXNet.NN.ModelZoo.Utils.Box
+import           MXNet.NN.Utils.Repa
 
 
-data ProposalTargetProp = ProposalTargetProp {
-    _pt_num_classes :: Int,
-    _pt_batch_images :: Int,
-    _pt_batch_rois :: Int,
-    _pt_fg_fraction :: Float,
-    _pt_fg_overlap :: Float,
-    _pt_box_stds :: [Float]
-}
+data ProposalTargetProp = ProposalTargetProp
+    { _pt_num_classes  :: Int
+    , _pt_batch_images :: Int
+    , _pt_batch_rois   :: Int
+    , _pt_fg_fraction  :: Float
+    , _pt_fg_overlap   :: Float
+    , _pt_box_stds     :: [Float]
+    }
 makeLenses ''ProposalTargetProp
 
 instance CustomOperationProp ProposalTargetProp where
