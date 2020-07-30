@@ -381,7 +381,7 @@ symbolTrain conf@RcnnConfiguration{..} =  do
                                      .& #preserve_shape := True
                                      .& #use_ignore := True
                                      .& #ignore_label := -1
-                                     .& #grad_scale := 1 / fromIntegral batch_size .& Nil)
+                                     .& #grad_scale := 1 / fromIntegral rcnn_batch_rois .& Nil)
 
             ---------------------------
             -- bbox_loss part
