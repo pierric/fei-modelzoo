@@ -11,19 +11,18 @@ import           RIO.List                     (unzip3, zip3)
 import           RIO.List.Partial             (head, last)
 import qualified RIO.NonEmpty                 as NE (toList)
 import qualified RIO.Text                     as T
-import qualified RIO.Vector.Boxed             as V
 import qualified RIO.Vector.Unboxed           as UV
 
 import           MXNet.Base
 import qualified MXNet.Base.NDArray           as A
-import           MXNet.Base.Operators.NDArray (argmax, argmax_channel)
+import           MXNet.Base.Operators.NDArray (argmax)
 import           MXNet.Base.Operators.Symbol  (add_n, clip, repeat, sigmoid,
                                                slice_axis, smooth_l1, transpose,
                                                _Custom, _MakeLoss, _arange,
                                                _contrib_AdaptiveAvgPooling2D,
                                                _contrib_ROIAlign,
                                                _contrib_box_decode,
-                                               _contrib_box_nms, _ones, _zeros)
+                                               _contrib_box_nms)
 import           MXNet.NN.EvalMetric
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
@@ -348,14 +347,14 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             -- rpn_cls_targets: (B, num_rois, 1)
             rpn_cls_prob <- prim sigmoid (#data := rpn_raw_scores .& Nil)
             a  <- log2_ rpn_cls_prob
-            ra <- rsubScalar 1 a >>= log2_
+            ra <- rsubScalar 1 rpn_cls_prob >>= log2_
             b  <- identity rpn_cls_targets
             rb <- rsubScalar 1 rpn_cls_targets
             rpn_cls_loss <- (join $ liftM2 add_ (mul_ a b) (mul_ ra rb)) >>= rsubScalar 0
 
             -- average number of targets per batch example
             cls_mask <- geqScalar 0 rpn_cls_targets
-            num_pos_avg  <- sum_ cls_mask Nothing >>= divScalar (fromIntegral batch_size)
+            num_pos_avg  <- sum_ cls_mask Nothing >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
 
             rpn_cls_loss <- mul_ rpn_cls_loss cls_mask >>= flip divBroadcast num_pos_avg
             rpn_cls_loss <- prim _MakeLoss (#data := rpn_cls_loss .& #grad_scale := 1.0 .& Nil)
@@ -374,6 +373,10 @@ symbolTrain conf@RcnnConfiguration{..} =  do
                          fullyConnected (#data := box_feat .& #num_hidden := rcnn_num_classes .& Nil)
             cls_score <- reshape [batch_size, rcnn_batch_rois, rcnn_num_classes] cls_score
 
+            -- `preserve_shape = True` makes softmax on the last dim.
+            -- `normalization = valid` divides the loss by the number of valid items.
+            --      we actually want to divide by average number of valid items in the batch,
+            --      so scale up by the size batch_size
             cls_prob  <- named "rcnn_cls_prob" $
                          softmaxoutput (#data := cls_score
                                      .& #label := cls_targets
@@ -381,7 +384,8 @@ symbolTrain conf@RcnnConfiguration{..} =  do
                                      .& #preserve_shape := True
                                      .& #use_ignore := True
                                      .& #ignore_label := -1
-                                     .& #grad_scale := 1 / fromIntegral rcnn_batch_rois .& Nil)
+                                     .& #normalization := #valid
+                                     .& #grad_scale := fromIntegral batch_size .& Nil)
 
             ---------------------------
             -- bbox_loss part
@@ -405,6 +409,11 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             bbox_feature <- concat_ 0 bbox_feature
 
             -- for each foreground ROI, predict boxes (reg) for each foreground class
+            avg_valid_pred <- gtScalar (-1) cls_targets
+                                >>= flip sum_ Nothing
+                                >>= divScalar (fromIntegral batch_size)
+                                >>= addScalar 1e-14
+
             bbox_pred <- named "rcnn_bbox_pred" $
                          fullyConnected (#data := bbox_feature .& #num_hidden := 4 * (rcnn_num_classes - 1) .& Nil)
             -- bbox_pred: (B * rcnn_fg_fraction * num_sample, num_fg_classes * 4)
@@ -412,8 +421,8 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             bbox_pred <- reshape [batch_size, -1, rcnn_num_classes - 1, 4] bbox_pred
             bbox_reg  <- sub_ bbox_pred bbox_targets
             bbox_reg  <- prim smooth_l1 (#data := bbox_reg .& #scalar := 1.0 .& Nil)
-            bbox_loss <- mul_ bbox_reg bbox_masks
-            bbox_loss <- prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 / fromIntegral rcnn_batch_rois .& Nil)
+            bbox_loss <- mul_ bbox_reg bbox_masks >>= flip divBroadcast avg_valid_pred
+            bbox_loss <- prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 .& Nil)
 
             cls_targets   <- reshape [batch_size, -1] cls_targets >>= blockGrad
             rpn_cls_prob  <- blockGrad rpn_cls_prob
@@ -475,7 +484,6 @@ instance EvalMetricMethod RPNAccMetric where
         return $ sformat ("<RPNAcc: " % fixed 2 % ">") (100 * fromIntegral s / fromIntegral n :: Float)
 
     evalMetric (RPNAccMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
-        -- traceShowM "rpnacc"
         -- rpn class pred: (B, rpn_post_topk, 1)
         -- rpn class label: (B, rpn_post_topk, 1)
         pred  <- toRepa @DIM3 (outputs  ^?! ix 0)
@@ -514,7 +522,6 @@ instance EvalMetricMethod RCNNAccMetric where
             (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
 
     evalMetric rcnn_acc _ outputs = liftIO $  do
-        -- traceShowM "rcnnacc"
         -- cls_prob: (B, num_pos_rois, rcnn_num_classes)
         -- label:    (B, num_pos_rois)
         let cls_prob = outputs ^?! ix 3
@@ -550,7 +557,6 @@ instance EvalMetricMethod RPNLogLossMetric where
         return $ sformat ("<RPNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evalMetric (RPNLogLossMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
-        -- traceShowM "rpnlogloss"
         let pred  = outputs  ^?! ix 0
             label = bindings ^?! ix lname
 
@@ -564,12 +570,17 @@ instance EvalMetricMethod RPNLogLossMetric where
             ep = constant (Z :. size) 1e-14
             one = constant (Z :. size) 1
 
+        -- dropping all item labeled -1
+        pred  <- Repa.selectP (\i -> label ^?! ixr (Z:.i) >= 0) (\i -> pred  ^?! ixr (Z:.i)) size
+        label <- Repa.selectP (\i -> label ^?! ixr (Z:.i) >= 0) (\i -> label ^?! ixr (Z:.i)) size
+        let Z:.num_valid = Repa.extent label
+
         let a = Repa.map log (pred Repa.+^ ep) Repa.*^ label
             b = Repa.map log (one Repa.-^ pred Repa.+^ ep) Repa.*^ (one Repa.-^ label)
             ce = Repa.map (0-) $ a Repa.+^ b
         cls_loss_val <- realToFrac <$> Repa.sumAllP ce
         modifyIORef' sumRef (+ cls_loss_val)
-        modifyIORef' cntRef (+ size)
+        modifyIORef' cntRef (+ num_valid)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -591,7 +602,6 @@ instance EvalMetricMethod RCNNLogLossMetric where
         return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evalMetric (RCNNLogLossMetricData phase cntRef sumRef) _ outputs = liftIO $  do
-        -- traceShowM "rcnnlogloss"
         -- rcnn class prediction: (B, rcnn_batch_rois, num_fg_classes+1)
         cls_prob <- toRepa @DIM3 (outputs ^?! ix 3)
         -- rcnn generated class target: (B, rcnn_batch_rois), value [0, num_fg_classes] or -1
@@ -629,7 +639,6 @@ instance EvalMetricMethod RPNL1LossMetric where
         return $ sformat ("<RPNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evalMetric (RPNL1LossMetricData phase cntRef sumRef) bindings outputs = liftIO $  do
-        -- traceShowM "rpnl1loss"
         bbox_loss <- toRepa @DIM3 (outputs ^?! ix 2)
         all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
         let Z:.batch_size:._:._ = Repa.extent bbox_loss
@@ -657,29 +666,14 @@ instance EvalMetricMethod RCNNL1LossMetric where
         return $ sformat ("<RCNNL1Loss: " % fixed 5 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evalMetric (RCNNL1LossMetricData phase cntRef sumRef) _ outputs = liftIO $ do
-        -- traceShowM "rcnnlogloss"
         -- rcnn box loss: (B, num_pos_rois, num_fg_classes, 4)
-
-        -- bbox_masks <- toRepa @DIM4 (outputs ^?! ix 6)
-        -- let ind = Repa.fromFunction (Z:.64 :: DIM1) (\(Z:.i) ->
-        --             let ind = Repa.slice bbox_masks (Z:.(0::Int):.i:.Repa.All:.(0::Int))
-        --             in case UV.findIndex (==1) $ Repa.toUnboxed $ Repa.computeUnboxedS ind of
-        --                  Just n  -> n
-        --                  Nothing -> -1)
-        -- traceShowM (Repa.computeUnboxedS ind)
-        -- cnt <- Repa.sumAllP $ Repa.map (\v -> if v > 0 then 1 else 0::Int) bbox_masks
-        -- traceShowM cnt
-
-        -- bbox_preds <- toRepa @DIM4 (outputs ^?! ix 7)
-        -- traceShowM $ Repa.computeUnboxedS $ Repa.slice bbox_preds (Z:.(0::Int):.(0::Int):.Repa.All:.Repa.All)
-
         bbox_loss <- toRepa @DIM4 (outputs ^?! ix 4)
         all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
 
-        let Z:.batch_size:.num_pos_rois:._:._ = Repa.extent bbox_loss
+        let Z:.batch_size:._:._:._ = Repa.extent bbox_loss
 
         modifyIORef' sumRef (+ realToFrac all_loss)
-        modifyIORef' cntRef (+ batch_size * num_pos_rois)
+        modifyIORef' cntRef (+ batch_size)
 
         s <- readIORef sumRef
         n <- readIORef cntRef

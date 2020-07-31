@@ -178,7 +178,7 @@ rcnnTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     -- std:  (4,)
     --
     -- returns:
-    --   cls_targets: (B, N_pos), value [0, num_classes]
+    --   cls_targets: (B, N_pos), value [0, num_classes], -1 to be ignored
     --   box_targets: (B, N_pos, C, 4)
     --   box_masks:   (B, N_pos, C, 4)
     --   mask_sel:    (B, N_pos)
