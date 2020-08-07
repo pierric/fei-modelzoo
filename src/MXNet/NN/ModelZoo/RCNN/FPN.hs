@@ -5,8 +5,8 @@ import qualified RIO.NonEmpty                as NE (reverse, unzip, zip, (<|))
 
 import           MXNet.Base                  (ArgOf (..), HMap (..),
                                               SymbolHandle, at', internals,
-                                              (.&))
-import           MXNet.Base.Operators.Symbol (_UpSampling)
+                                              prim, (.&))
+import           MXNet.Base.Operators.Tensor (_UpSampling)
 import           MXNet.NN.Layer
 
 -- TODO

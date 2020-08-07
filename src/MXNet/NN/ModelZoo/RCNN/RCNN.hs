@@ -4,7 +4,7 @@ import           RIO
 import           RIO.List                    (unzip3)
 
 import           MXNet.Base
-import qualified MXNet.Base.Operators.Symbol as S
+import qualified MXNet.Base.Operators.Tensor as T
 import           MXNet.NN.Layer
 
 
@@ -23,9 +23,9 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
     --   matches:(B,S), value [0, M)
     (rois, samples, matches) <- unzip3 <$> mapM sampler [0..batch_size-1]
 
-    rois    <- stack (#data := rois    .& #axis := 0 .& Nil)
-    samples <- stack (#data := samples .& #axis := 0 .& Nil)
-    matches <- stack (#data := matches .& #axis := 0 .& Nil)
+    rois    <- stack 0 rois
+    samples <- stack 0 samples
+    matches <- stack 0 matches
 
     return (rois, samples, matches)
 
@@ -36,22 +36,20 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           gt_box <- getBatch gt_boxes batch_index
 
           -- TODO why sum up the coordinates as score?
-          gt_score <- prim S.sum (#data := gt_box
-                               .& #axis := Just [(-1)]
-                               .& #keepdims := True .& Nil)
+          gt_score <- sum_ gt_box (Just [(-1)]) True
           gt_score <- addScalar 1 gt_score
-          gt_score <- prim S.sign (#data := gt_score .& Nil)
+          gt_score <- prim T._sign (#data := gt_score .& Nil)
 
           all_rois   <- concat_ 0 [roi, gt_box]
           all_scores <- concat_ 0 [score, gt_score]
 
-          ious <- prim S._contrib_box_iou (#lhs := all_rois
-                                        .& #rhs := gt_box
-                                        .& #format := #corner .& Nil)
+          ious <- prim T.__contrib_box_iou (#lhs := all_rois
+                                         .& #rhs := gt_box
+                                         .& #format := #corner .& Nil)
           -- iou of the best gt box of each roi
-          ious_max <- prim S.max (#data := ious .& #axis := Just [-1] .& Nil)
+          ious_max <- prim T._max (#data := ious .& #axis := Just [-1] .& Nil)
           -- index of the best gt box of each roi
-          ious_argmax <- prim S.argmax (#data := ious .& #axis := Just (-1) .& Nil)
+          ious_argmax <- argmax ious (Just (-1)) False
 
           class_0 <- zerosLike ious_max
           class_2 <- onesLike  ious_max >>= mulScalar 2
@@ -68,21 +66,18 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           mask <- where_ pos_indices    class_3 mask
 
           -- shuffle mask and ious_argmax
-          rand <- prim S._random_uniform (#low := 0 .& #high := 1
-                                       .& #shape := [num_proposal + max_num_gt] .& Nil)
-          rand <- prim S.slice_like (#data := rand .& #shape_like := ious_max .& Nil)
-          index<- prim S.argsort    (#data := rand .& Nil)
+          rand <- prim T.__random_uniform (#low := 0 .& #high := 1
+                                        .& #shape := [num_proposal + max_num_gt] .& Nil)
+          rand <- prim T._slice_like (#data := rand .& #shape_like := ious_max .& Nil)
+          index<- prim T._argsort    (#data := rand .& Nil)
           mask <- takeI index mask
           ious_argmax <- takeI index ious_argmax
 
           -- sort in order of pos, neg, ignore
-          order <- prim S.argsort (#data := mask .& #is_ascend := False .& Nil)
+          order <- prim T._argsort (#data := mask .& #is_ascend := False .& Nil)
           let max_pos = floor $ fromIntegral num_sample * fg_fraction
           -- topk
-          topk  <- prim S.slice_axis (#data := order
-                                   .& #axis  := 0
-                                   .& #begin := 0
-                                   .& #end := Just max_pos .& Nil)
+          topk  <- slice_axis order 0 0 (Just max_pos)
           topk_indices <- takeI topk index
           topk_samples <- takeI topk mask
           topk_matches <- takeI topk ious_argmax
@@ -99,29 +94,17 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           topk_samples <- where_ cond neg_class topk_samples
 
           -- sample the negative class
-          index       <- prim S.slice_axis (#data := index
-                                         .& #axis  := 0
-                                         .& #begin := max_pos
-                                         .& #end := Nothing .& Nil)
-          mask        <- prim S.slice_axis (#data := mask
-                                         .& #axis  := 0
-                                         .& #begin := max_pos
-                                         .& #end := Nothing .& Nil)
-          ious_argmax <- prim S.slice_axis (#data := ious_argmax
-                                         .& #axis  := 0
-                                         .& #begin := max_pos
-                                         .& #end := Nothing .& Nil)
+          index       <- slice_axis index 0 max_pos Nothing
+          mask        <- slice_axis mask  0 max_pos Nothing
+          ious_argmax <- slice_axis ious_argmax 0 max_pos Nothing
           -- class 2 ==> class 4
           class_4 <- onesLike mask >>= mulScalar 4
           cond    <- eqScalar 2 mask
           mask    <- where_ cond class_4 mask
-          order   <- prim S.argsort (#data := mask .& #is_ascend := False .& Nil)
+          order   <- prim T._argsort (#data := mask .& #is_ascend := False .& Nil)
 
           let num_neg = num_sample - max_pos
-          bottomk <- prim S.slice_axis (#data := order
-                                     .& #axis  := 0
-                                     .& #begin := 0
-                                     .& #end := Just num_neg .& Nil)
+          bottomk <- slice_axis order 0 0 (Just num_neg)
           bottomk_indices <- takeI bottomk index
           bottomk_samples <- takeI bottomk mask
           bottomk_matches <- takeI bottomk ious_argmax
@@ -144,17 +127,14 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           sampled_rois <- takeI indices all_rois
           [x1, y1, x2, y2] <- splitBySections 4 (-1) True sampled_rois
           rois_areas <- join $ liftM2 mul_ (sub_ x2 x1) (sub_ y2 y1)
-          ind <- prim S.argsort (#data := rois_areas .& Nil)
+          ind <- prim T._argsort (#data := rois_areas .& Nil)
           r <- takeI ind sampled_rois
           s <- takeI ind samples
           m <- takeI ind matches
           return (r, s, m)
 
       getBatch s i = squeeze (Just [0]) =<<
-                     prim S.slice_axis (#data  := s
-                               .& #axis  := 0
-                               .& #begin := i
-                               .& #end   := Just (i + 1) .& Nil)
+                     slice_axis s 0 i (Just (i + 1))
 
 
 rcnnTargetGenerator :: Int -> Int -> Int
@@ -184,10 +164,10 @@ rcnnTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     --   mask_sel:    (B, N_pos)
     --
     labels <- reshape [0, 1, -1] gt_label
-    labels <- prim S.broadcast_like (#lhs := labels .& #rhs := matches .& #lhs_axes := Just [1] .& #rhs_axes := Just [1] .& Nil)
+    labels <- prim T._broadcast_like (#lhs := labels .& #rhs := matches .& #lhs_axes := Just [1] .& #rhs_axes := Just [1] .& Nil)
     -- labels: (B,N,M) forall batch, roi, gt. class id
     -- fg_cls_targets: (B,N) forall batch, roi, class id of the best gt
-    fg_cls_targets <- prim S.pick (#data := labels .& #index := matches .& #axis := Just 2 .& Nil)
+    fg_cls_targets <- pick (#data := labels .& #index := matches .& #axis := Just 2 .& Nil)
     -- shift by 1, reserve 0 for the background class
     cls_targets <- addScalar 1 fg_cls_targets
 
@@ -199,38 +179,31 @@ rcnnTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     cls_targets <- where_ pos cls_targets ign
     cls_targets <- where_ neg bck cls_targets
 
-    ret <- prim S._contrib_box_encode (#samples := samples
-                                    .& #matches := matches
-                                    .& #anchors := anchors
-                                    .& #refs    := gt_boxes
-                                    .& #means   := mean
-                                    .& #stds    := std .& Nil)
+    ret <- prim T.__contrib_box_encode (#samples := samples
+                                     .& #matches := matches
+                                     .& #anchors := anchors
+                                     .& #refs    := gt_boxes
+                                     .& #means   := mean
+                                     .& #stds    := std .& Nil)
     [box_targets, box_masks] <- mapM (ret `at`) ([0, 1] :: [Int])
 
     fg_cls_targets <- expandDims 2 fg_cls_targets
-    class_ids_fg <- prim S._arange (#start := 0 .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
+    class_ids_fg <- prim T.__arange (#start := 0 .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
     class_ids_fg <- reshape [1,1,-1] class_ids_fg
     -- (B, N, C), one hot indicator for the best gt class id for each roi of each batch
     target_class_fg_onehot <- eqBroadcast fg_cls_targets class_ids_fg
 
-    masks_sel <- prim S.slice_axis (#data := box_masks .& #axis := -1 .& #begin := 0 .& #end := Just 1 .& Nil)
-    masks_sel <- prim S.argsort (#data := masks_sel .& #axis := Just 1 .& #is_ascend := False .& Nil)
+    masks_sel <- slice_axis box_masks (-1) 0 (Just 1)
+    masks_sel <- prim T._argsort (#data := masks_sel .& #axis := Just 1 .& #is_ascend := False .& Nil)
     masks_sel <- reshape [batch_size, -1] masks_sel
     -- mask indices of those positive ones (take at most max_pos items)
-    masks_sel <- prim S.slice_axis (#data := masks_sel .& #axis := 1 .& #begin := 0 .& #end := Just max_pos .& Nil)
+    masks_sel <- slice_axis masks_sel 1 0 (Just max_pos)
 
     (box_targets, box_masks, clsid_ohs) <- fmap unzip3 $ forM [0..batch_size-1] $ \i -> do
-        ind    <- prim S.slice_axis (#data := masks_sel .& #axis := 0 .& #begin := i .& #end := Just (i+1) .& Nil)
-                    >>= squeeze (Just [0])
-
-        target <- prim S.slice_axis (#data := box_targets .& #axis := 0 .& #begin := i .& #end := Just (i+1) .& Nil)
-                    >>= squeeze (Just [0])
-
-        mask   <- prim S.slice_axis (#data := box_masks   .& #axis := 0 .& #begin := i .& #end := Just (i+1) .& Nil)
-                    >>= squeeze (Just [0])
-
-        clsid_oh <- prim S.slice_axis (#data := target_class_fg_onehot .& #axis := 0 .& #begin := i .& #end := Just (i+1) .& Nil)
-                    >>= squeeze (Just [0])
+        ind      <- slice_axis masks_sel 0 i (Just (i+1)) >>= squeeze (Just [0])
+        target   <- slice_axis box_targets 0 i (Just (i+1)) >>= squeeze (Just [0])
+        mask     <- slice_axis box_masks 0 i (Just (i+1)) >>= squeeze (Just [0])
+        clsid_oh <- slice_axis target_class_fg_onehot 0 i (Just (i+1)) >>= squeeze (Just [0])
 
         target   <- takeI ind target   >>= expandDims 0
         mask     <- takeI ind mask     >>= expandDims 0

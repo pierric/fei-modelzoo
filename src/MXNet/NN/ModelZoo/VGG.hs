@@ -92,13 +92,13 @@ getFeature dat layers filters with_batch_norm with_last_pooling = do
 
 getTopFeature :: SymbolHandle -> Layer SymbolHandle
 getTopFeature input = do
-    sym <- unique' $ flatten (#data := input .& Nil)
+    sym <- unique' $ flatten input
     sym <- fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
     -- sym <- activation (#data := sym .& #act_type := #relu .& Nil)
-    sym <- dropout (#data := sym .& #p := 0.5 .& Nil)
+    sym <- dropout sym 0.5
     sym <- fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
     -- sym <- activation (#data := sym .& #act_type := #relu .& Nil)
-    dropout (#data := sym .& #p := 0.5 .& Nil)
+    dropout sym 0.5
 
 symbol :: SymbolHandle -> Int -> Bool -> Layer SymbolHandle
 symbol dat num_layers with_batch_norm =

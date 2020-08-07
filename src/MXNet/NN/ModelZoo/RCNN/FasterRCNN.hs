@@ -1,35 +1,34 @@
 module MXNet.NN.ModelZoo.RCNN.FasterRCNN where
 
-import           Control.Lens                 (bimap, ix, (^?!))
-import qualified Data.Array.Repa              as Repa
+import           Control.Lens                (bimap, ix, (^?!))
+import qualified Data.Array.Repa             as Repa
 import           Data.Array.Repa.Index
 import           Data.Array.Repa.Shape
 import           Formatting
 import           RIO
-import qualified RIO.HashMap                  as M
-import           RIO.List                     (unzip3, zip3)
-import           RIO.List.Partial             (head, last)
-import qualified RIO.NonEmpty                 as NE (toList)
-import qualified RIO.Text                     as T
-import qualified RIO.Vector.Unboxed           as UV
+import qualified RIO.HashMap                 as M
+import           RIO.List                    (unzip3, zip3)
+import           RIO.List.Partial            (head, last)
+import qualified RIO.NonEmpty                as NE (toList)
+import qualified RIO.Text                    as T
+import qualified RIO.Vector.Unboxed          as UV
+import qualified RIO.Vector.Unboxed.Partial  as UV
 
 import           MXNet.Base
-import qualified MXNet.Base.NDArray           as A
-import           MXNet.Base.Operators.NDArray (argmax)
-import           MXNet.Base.Operators.Symbol  (add_n, clip, repeat, sigmoid,
-                                               slice_axis, smooth_l1, transpose,
-                                               _Custom, _MakeLoss, _arange,
-                                               _contrib_AdaptiveAvgPooling2D,
-                                               _contrib_ROIAlign,
-                                               _contrib_box_decode,
-                                               _contrib_box_nms)
+import qualified MXNet.Base.NDArray          as A
+import           MXNet.Base.Operators.Tensor (_Custom, _MakeLoss, __arange,
+                                              __contrib_AdaptiveAvgPooling2D,
+                                              __contrib_ROIAlign,
+                                              __contrib_box_decode,
+                                              __contrib_box_nms, _add_n, _clip,
+                                              _max, _min, _repeat, _sigmoid,
+                                              _smooth_l1, _transpose)
 import           MXNet.NN.EvalMetric
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
 import           MXNet.NN.ModelZoo.RCNN.RCNN
-import qualified MXNet.NN.ModelZoo.Resnet     as Resnet
-import qualified MXNet.NN.ModelZoo.VGG        as VGG
-import qualified MXNet.NN.NDArray             as A
+import qualified MXNet.NN.ModelZoo.Resnet    as Resnet
+import qualified MXNet.NN.ModelZoo.VGG       as VGG
 import           MXNet.NN.Utils.Repa
 
 data Backbone = VGG16
@@ -155,16 +154,16 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
 
             rpn_raw_score <- conv1x1_cls x
             -- (batch_size, num_variation, H, W) ==> (batch_size, H, W, num_variation)
-            rpn_raw_score <- prim transpose (#data := rpn_raw_score  .& #axes := [0, 2, 3, 1] .& Nil)
+            rpn_raw_score <- prim _transpose (#data := rpn_raw_score  .& #axes := [0, 2, 3, 1] .& Nil)
             -- (batch_size, H, W, num_variation) ==> (batch_size, H*W*num_variation, 1)
             rpn_raw_score <- reshape [0, -1, 1] rpn_raw_score
 
-            rpn_cls_score <- prim sigmoid (#data := rpn_raw_score .& Nil)
+            rpn_cls_score <- prim _sigmoid (#data := rpn_raw_score .& Nil)
             rpn_cls_score <- reshape [0, -1, 1] rpn_cls_score
 
             rpn_raw_boxreg <- conv1x1_reg x
             -- (batch_size, num_variation * 4, H, W) ==> (batch_size, H, W, num_variation * 4)
-            rpn_raw_boxreg <- prim transpose (#data := rpn_raw_boxreg .& #axes := [0, 2, 3, 1] .& Nil)
+            rpn_raw_boxreg <- prim _transpose (#data := rpn_raw_boxreg .& #axes := [0, 2, 3, 1] .& Nil)
             -- (batch_size, H, W, num_variation * 4) ==> (batch_size, H*W*num_variation, 4)
             rpn_raw_boxreg <- reshape [0, -1, 4] rpn_raw_boxreg
 
@@ -173,7 +172,7 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
             return (rpn_pre, rpn_raw_score, rpn_raw_boxreg)
 
         region_proposer min_size anchors boxregs scores = do
-            rois <- prim _contrib_box_decode (#data := boxregs .& #anchors := anchors .& Nil)
+            rois <- prim __contrib_box_decode (#data := boxregs .& #anchors := anchors .& Nil)
             (xmin, ymin, xmax, ymax) <- bbox_clip_to_image rois imInfo
             width   <- sub_ xmax xmin >>= addScalar 1
             height  <- sub_ ymax ymin >>= addScalar 1
@@ -188,27 +187,18 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
         nms rpn_pre = do
             -- rpn_pre shape: (batch_size, num_anchors, 5)
             -- with dim 3: [score, xmin, ymin, xmax, ymax]
-            tmp <- prim _contrib_box_nms (#data := rpn_pre
+            tmp <- prim __contrib_box_nms (#data := rpn_pre
                                .& #overlap_thresh := rpn_nms_thresh
                                .& #topk := rpn_pre_topk
                                .& #coord_start := 1
                                .& #score_index := 0
                                .& #id_index    := (-1)
                                .& #force_suppress := True .& Nil)
-            tmp <- prim slice_axis (#data := tmp
-                                 .& #axis := 1
-                                 .& #begin := 0
-                                 .& #end := Just rpn_post_topk .& Nil)
+            tmp <- slice_axis tmp 1 0 (Just rpn_post_topk)
             rpn_roi_scores <- blockGrad =<<
-                              prim slice_axis (#data := tmp
-                                            .& #axis := (-1)
-                                            .& #begin := 0
-                                            .& #end := Just 1 .& Nil)
+                              slice_axis tmp (-1) 0 (Just 1)
             rpn_roi_boxes  <- blockGrad =<<
-                              prim slice_axis (#data := tmp
-                                            .& #axis := (-1)
-                                            .& #begin := 1
-                                            .& #end := Nothing .& Nil)
+                              slice_axis tmp (-1) 1 Nothing
             return (rpn_roi_scores, rpn_roi_boxes)
 
         bbox_clip_to_image rois info = do
@@ -252,21 +242,21 @@ alignROIs features rois stage_indices roi_pooled_size strides = do
                      log2_ >>=
                      addScalar 4 >>=
                      floor_
-    roi_level <- prim clip (#data := roi_level_raw
-                         .& #a_min := fromIntegral min_stage
-                         .& #a_max := fromIntegral max_stage .& Nil)
+    roi_level <- prim _clip (#data := roi_level_raw
+                          .& #a_min := fromIntegral min_stage
+                          .& #a_max := fromIntegral max_stage .& Nil)
                  >>= squeeze Nothing
     let align (lvl, feat, stride) = do
             cond <- eqScalar (fromIntegral lvl) roi_level
             omit <- onesLike rois >>= mulScalar (-1)
             masked <- where_ cond rois omit
-            prim _contrib_ROIAlign (#data := feat
+            prim __contrib_ROIAlign (#data := feat
                                  .& #rois := masked
                                  .& #pooled_size := roi_pooled_size
                                  .& #spatial_scale := 1 / fromIntegral stride
                                  .& #sample_ratio := 2 .& Nil)
     features <- mapM align $ zip3 [max_stage,max_stage-1..min_stage] (NE.toList features) strides
-    prim add_n (#args := features .& Nil)
+    prim _add_n (#args := features .& Nil)
 
 
 symbolTrain :: RcnnConfiguration -> Layer SymbolHandle
@@ -287,15 +277,8 @@ symbolTrain conf@RcnnConfiguration{..} =  do
     -- box_reg_mean <- unique' $ prim _zeros (#shape := [4] .& #dtype := #float32 .& Nil)
     -- box_reg_std  <- unique' $ prim _ones  (#shape := [4] .& #dtype := #float32 .& Nil)
 
-    gt_labels <- unique' $ prim slice_axis (#data  := gt_boxes
-                               .& #axis  := (-1)
-                               .& #begin := 4
-                               .& #end   := Nothing .& Nil)
-
-    gt_boxes  <- unique' $ prim slice_axis (#data  := gt_boxes
-                               .& #axis  := (-1)
-                               .& #begin := 0
-                               .& #end   := Just 4 .& Nil)
+    gt_labels <- unique' $ slice_axis gt_boxes (-1) 4 Nothing
+    gt_boxes  <- unique' $ slice_axis gt_boxes (-1) 0 (Just 4)
 
     sequential "features" $ do
         feats <- features1 backbone dat
@@ -316,8 +299,8 @@ symbolTrain conf@RcnnConfiguration{..} =  do
                                                     rois_scores
                                                     gt_boxes
 
-            roi_batchid <- prim _arange (#start := 0 .& #stop := Just (fromIntegral batch_size) .& Nil)
-            roi_batchid <- prim repeat  (#data := roi_batchid .& #repeats := rcnn_batch_rois .& Nil)
+            roi_batchid <- prim __arange (#start := 0 .& #stop := Just (fromIntegral batch_size) .& Nil)
+            roi_batchid <- prim _repeat  (#data := roi_batchid .& #repeats := rcnn_batch_rois .& Nil)
             roi_batchid <- reshape [-1, 1] roi_batchid
             -- rois: (B * rcnn_batch_rois, 4)
             rois <- reshape [-1, 4] rois_boxes
@@ -345,7 +328,7 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             -- sigmoid + binary-cross-entropy
             -- rpn_raw_scores: (B, num_rois, 1)
             -- rpn_cls_targets: (B, num_rois, 1)
-            rpn_cls_prob <- prim sigmoid (#data := rpn_raw_scores .& Nil)
+            rpn_cls_prob <- prim _sigmoid (#data := rpn_raw_scores .& Nil)
             a  <- log2_ rpn_cls_prob
             ra <- rsubScalar 1 rpn_cls_prob >>= log2_
             b  <- identity rpn_cls_targets
@@ -354,18 +337,18 @@ symbolTrain conf@RcnnConfiguration{..} =  do
 
             -- average number of targets per batch example
             cls_mask <- geqScalar 0 rpn_cls_targets
-            num_pos_avg  <- sum_ cls_mask Nothing >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
+            num_pos_avg  <- sum_ cls_mask Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
 
             rpn_cls_loss <- mul_ rpn_cls_loss cls_mask >>= flip divBroadcast num_pos_avg
             rpn_cls_loss <- prim _MakeLoss (#data := rpn_cls_loss .& #grad_scale := 1.0 .& Nil)
 
             rpn_bbox_reg  <- sub_ rpn_raw_boxregs rpn_box_targets
-            rpn_bbox_reg  <- prim smooth_l1 (#data := rpn_bbox_reg .& #scalar := 3.0 .& Nil)
+            rpn_bbox_reg  <- prim _smooth_l1 (#data := rpn_bbox_reg .& #scalar := 3.0 .& Nil)
             rpn_bbox_loss <- mul_ rpn_bbox_reg rpn_box_masks >>= flip divBroadcast num_pos_avg
             rpn_bbox_loss <- prim _MakeLoss
                                 (#data := rpn_bbox_loss .& #grad_scale := 1.0 .& Nil)
 
-            box_feat <- prim _contrib_AdaptiveAvgPooling2D (#data := top_feat .& #output_size := [1, 1] .& Nil)
+            box_feat <- prim __contrib_AdaptiveAvgPooling2D (#data := top_feat .& #output_size := [1, 1] .& Nil)
 
             -- rcnn class prediction
             -- cls_score: (batch_size * rcnn_batch_rois, rcnn_num_classes)
@@ -397,20 +380,14 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             -- select only feature that has foreground gt for each batch example
             -- positive_indices: (B, rcnn_fg_fraction * num_sample)
             bbox_feature <- forM ([0..batch_size-1] :: [_]) $ \i -> do
-                ind <- prim slice_axis (#data := positive_indices
-                                     .& #axis := 0
-                                     .& #begin := i .& #end := Just (i+1) .& Nil)
-                       >>= squeeze Nothing
-                bat <- prim slice_axis (#data := bbox_feature
-                                     .& #axis := 0
-                                     .& #begin := i .& #end := Just (i+1) .& Nil)
-                       >>= squeeze Nothing
+                ind <- slice_axis positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
+                bat <- slice_axis bbox_feature 0 i (Just (i+1)) >>= squeeze Nothing
                 takeI ind bat
             bbox_feature <- concat_ 0 bbox_feature
 
             -- for each foreground ROI, predict boxes (reg) for each foreground class
             avg_valid_pred <- gtScalar (-1) cls_targets
-                                >>= flip sum_ Nothing
+                                >>= \s -> sum_ s Nothing False
                                 >>= divScalar (fromIntegral batch_size)
                                 >>= addScalar 1e-14
 
@@ -420,7 +397,7 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             --        ==> (B, rcnn_fg_fraction * num_sample, num_fg_classes, 4)
             bbox_pred <- reshape [batch_size, -1, rcnn_num_classes - 1, 4] bbox_pred
             bbox_reg  <- sub_ bbox_pred bbox_targets
-            bbox_reg  <- prim smooth_l1 (#data := bbox_reg .& #scalar := 1.0 .& Nil)
+            bbox_reg  <- prim _smooth_l1 (#data := bbox_reg .& #scalar := 1.0 .& Nil)
             bbox_loss <- mul_ bbox_reg bbox_masks >>= flip divBroadcast avg_valid_pred
             bbox_loss <- prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 .& Nil)
 
@@ -527,9 +504,9 @@ instance EvalMetricMethod RCNNAccMetric where
         let cls_prob = outputs ^?! ix 3
 
         label <- toRepa @DIM2 (outputs ^?! ix 5)
-        cls_prob   <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
-        pred_class <- sing argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
-        pred_class <- toRepa @DIM2 (NDArray pred_class :: NDArray a)
+        cls_prob   <- A.makeNDArrayLike cls_prob contextCPU >>= copy cls_prob
+        pred_class <- argmax cls_prob (Just 2) False
+        pred_class <- toRepa @DIM2 pred_class
 
         num_matches <- Repa.sumAllP $ Repa.zipWith (\v w -> if v == w then 1 else 0) pred_class label
         num_fg  <- Repa.sumAllP $ Repa.map (\v -> if v >  0 then 1 else 0) label
@@ -561,9 +538,9 @@ instance EvalMetricMethod RPNLogLossMetric where
             label = bindings ^?! ix lname
 
         -- both pred and label: (B, rpn_post_topk, 1)
-        label <- A.reshape label [-1]
+        label <- reshape [-1] label
         label <- toRepa @DIM1 label
-        pred  <- A.reshape pred [-1]
+        pred  <- reshape [-1] pred
         pred  <- toRepa @DIM1 pred
 
         let Z :. size = Repa.extent label
@@ -602,15 +579,19 @@ instance EvalMetricMethod RCNNLogLossMetric where
         return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
 
     evalMetric (RCNNLogLossMetricData phase cntRef sumRef) _ outputs = liftIO $  do
-        -- rcnn class prediction: (B, rcnn_batch_rois, num_fg_classes+1)
+        -- rcnn class prediction: (B, rcnn_batch_rois, rcnn_num_classes)
         cls_prob <- toRepa @DIM3 (outputs ^?! ix 3)
-        -- rcnn generated class target: (B, rcnn_batch_rois), value [0, num_fg_classes] or -1
+        -- rcnn generated class target: (B, rcnn_batch_rois), value [0, rcnn_num_classes] or -1
         label    <- toRepa @DIM2 (outputs ^?! ix 5)
+
+        -- m0 <- prim _min (#data := outputs ^?! ix 5 .& Nil) >>= toVector
+        -- m1 <- prim _max (#data := outputs ^?! ix 5 .& Nil) >>= toVector
+        -- traceShowM (m0, m1)
 
         let lbl_shp@(Z :. _ :. num_rois) = Repa.extent label
             ce = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
-                    let target = floor $ label Repa.! pos
-                        prob   = cls_prob Repa.! (Z :. bi :. ai :. target)
+                    let target = floor $ label `Repa.index` pos
+                        prob   = cls_prob `Repa.index` (Z :. bi :. ai :. target)
                         eps    = 1e-14
                      in if target == -1 then 0 else - log (eps + prob))
 

@@ -35,7 +35,7 @@ symbol = do
         a2 <- activation  (#data := v2 .& #act_type := #tanh .& Nil)
         p2 <- pooling     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-        fl <- flatten     (#data := p2 .& Nil)
+        fl <- flatten     p2
 
         v3 <- fullyConnected (#data := fl .& #num_hidden := 500 .& Nil)
         a3 <- activation     (#data := v3 .& #act_type := #tanh .& Nil)
