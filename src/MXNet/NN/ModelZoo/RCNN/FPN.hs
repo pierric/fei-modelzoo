@@ -21,6 +21,7 @@ fpnFeatureExpander sym output_layers = do
     outputs <- liftIO $ newIORef (error "empty")
     sequential "fpn" $ do
         foldM_ (topDownPass outputs) Nothing (NE.zip layer_filters layers)
+    -- return features bottom-up (from big to small)
     liftIO $ readIORef outputs
 
   where

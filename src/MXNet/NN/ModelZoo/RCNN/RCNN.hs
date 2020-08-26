@@ -35,7 +35,8 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           score  <- getBatch scores batch_index
           gt_box <- getBatch gt_boxes batch_index
 
-          -- TODO why sum up the coordinates as score?
+          -- why sum up the coordinates as score?
+          -- because of padding gt are coded as all -1
           gt_score <- sum_ gt_box (Just [(-1)]) True
           gt_score <- addScalar 1 gt_score
           gt_score <- prim T._sign (#data := gt_score .& Nil)
