@@ -158,7 +158,7 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
             -- (batch_size, H, W, num_variation) ==> (batch_size, H*W*num_variation, 1)
             rpn_raw_score <- reshape [0, -1, 1] rpn_raw_score
 
-            rpn_cls_score <- prim _sigmoid (#data := rpn_raw_score .& Nil)
+            rpn_cls_score <- blockGrad =<< prim _sigmoid (#data := rpn_raw_score .& Nil)
             rpn_cls_score <- reshape [0, -1, 1] rpn_cls_score
 
             rpn_raw_boxreg <- conv1x1_reg x
@@ -206,7 +206,7 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
             -- info: (B, 3)
             -- return: (B,N), (B,N), (B,N), (B,N)
             [xmin, ymin, xmax, ymax] <- splitBySections 4 (-1) False rois
-            [_, height, width]       <- splitBySections 3 (-1) False info
+            [height, width, _]       <- splitBySections 3 (-1) False info
             height <- expandDims (-1) height
             width  <- expandDims (-1) width
             w_ub <- subScalar 1 width
@@ -348,7 +348,15 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             rpn_bbox_loss <- prim _MakeLoss
                                 (#data := rpn_bbox_loss .& #grad_scale := 1.0 .& Nil)
 
-            box_feat <- prim __contrib_AdaptiveAvgPooling2D (#data := top_feat .& #output_size := [1, 1] .& Nil)
+            box_feat <- prim __contrib_AdaptiveAvgPooling2D (#data := top_feat .& #output_size := [7, 7] .& Nil)
+            -- box_feat <- pooling     (#data      := top_feat
+            --                       .& #kernel    := [3,3]
+            --                       .& #stride    := [2,2]
+            --                       .& #pad       := [1,1]
+            --                       .& #pool_type := #avg .& Nil)
+            -- box_feat <- named "rcnn_cls_score_fc" $
+            --             fullyConnected (#data := box_feat .& #num_hidden := 1024 .& Nil)
+            box_feat <- activation     (#data := box_feat .& #act_type  := #relu .& Nil)
 
             -- rcnn class prediction
             -- cls_score: (batch_size * rcnn_batch_rois, rcnn_num_classes)
@@ -363,7 +371,6 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             cls_prob  <- named "rcnn_cls_prob" $
                          softmaxoutput (#data := cls_score
                                      .& #label := cls_targets
-                                     .& #normalization := #batch
                                      .& #preserve_shape := True
                                      .& #use_ignore := True
                                      .& #ignore_label := -1
@@ -508,8 +515,8 @@ instance EvalMetricMethod RCNNAccMetric where
         pred_class <- argmax cls_prob (Just 2) False
         pred_class <- toRepa @DIM2 pred_class
 
-        num_matches <- Repa.sumAllP $ Repa.zipWith (\v w -> if v == w then 1 else 0) pred_class label
-        num_fg  <- Repa.sumAllP $ Repa.map (\v -> if v >  0 then 1 else 0) label
+        num_matches <- Repa.sumAllP $ Repa.zipWith (\v w -> if v == w && w > 0 then 1 else 0) pred_class label
+        num_fg  <- Repa.sumAllP $ Repa.map (\v -> if v > 0 then 1 else 0) label
 
         let ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
         modifyIORef' ref_acc_fg  (bimap (+ num_matches) (+ num_fg))
@@ -584,9 +591,13 @@ instance EvalMetricMethod RCNNLogLossMetric where
         -- rcnn generated class target: (B, rcnn_batch_rois), value [0, rcnn_num_classes] or -1
         label    <- toRepa @DIM2 (outputs ^?! ix 5)
 
-        -- m0 <- prim _min (#data := outputs ^?! ix 5 .& Nil) >>= toVector
-        -- m1 <- prim _max (#data := outputs ^?! ix 5 .& Nil) >>= toVector
-        -- traceShowM (m0, m1)
+        -- _pred_cls <- argmax (outputs ^?! ix 3) (Just 2) False
+        -- _pred_cls <- UV.convert <$> toVector _pred_cls
+        -- _label    <- UV.convert <$> toVector (outputs ^?! ix 5)
+        -- _pred_cls <- return (UV.map floor _pred_cls :: UV.Vector Int)
+        -- _label    <- return (UV.map floor _label    :: UV.Vector Int)
+        -- let _cmp = UV.filter ((>0) . snd) $ UV.zip _pred_cls _label
+        -- traceShowM _cmp
 
         let lbl_shp@(Z :. _ :. num_rois) = Repa.extent label
             ce = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
