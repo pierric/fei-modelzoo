@@ -46,7 +46,7 @@ symbol dat = unique rootName $ do
                    .& #kernel := [7,7]
                    .& #pool_type := #avg
                    .& #global_pool := True .& Nil)
-    flat <- flatten (#data := pool1 .& Nil)
+    flat <- flatten pool1
     named "dense0" $ fullyConnected (#data := flat
                                   .& #num_hidden := 10 .& Nil)
   where
@@ -59,7 +59,7 @@ symbol dat = unique rootName $ do
      ++ [(256, [2,2], False, 3, 1)] ++ [(256, [1,1], True, 3, i) | i <- [2..18]]
     resargs = #bottle_neck := True .& #workspace := conv_workspace .& #memonger := False .& Nil
 
-type instance ParameterList "_residual_layer(resnext)" =
+type instance ParameterList "_residual_layer(resnext)" t =
   '[ '("data"       , 'AttrReq SymbolHandle)
    , '("num_filter" , 'AttrReq Int)
    , '("stride"     , 'AttrReq [Int])
@@ -69,8 +69,8 @@ type instance ParameterList "_residual_layer(resnext)" =
    , '("bn_mom"     , 'AttrOpt Float)
    , '("workspace"  , 'AttrOpt Int)
    , '("memonger"   , 'AttrOpt Bool) ]
-residual :: (Fullfilled "_residual_layer(resnext)" args)
-         => Int -> ArgsHMap "_residual_layer(resnext)" args -> Layer SymbolHandle
+residual :: (Fullfilled "_residual_layer(resnext)" () args)
+         => Int -> ArgsHMap "_residual_layer(resnext)" () args -> Layer SymbolHandle
 residual _id args = do
     let dat        = args ! #data
         num_filter = args ! #num_filter
@@ -146,7 +146,7 @@ residual _id args = do
                             .& #fix_gamma   := False .& Nil)
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
-        eltwise <- plus (#lhs := bn3 .& #rhs := shortcut .& Nil)
+        eltwise <- add_ bn3 shortcut
         activation (#data := eltwise .& #act_type := #relu .& Nil)
     else do
         conv1 <- named (sformat ("conv" % int) _id) $
@@ -195,5 +195,5 @@ residual _id args = do
                             .& #fix_gamma   := False .& Nil)
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
-        eltwise <- plus (#lhs := bn2 .& #rhs := shortcut .& Nil)
+        eltwise <- add_ bn2 shortcut
         activation (#data := eltwise .& #act_type := #relu .& Nil)

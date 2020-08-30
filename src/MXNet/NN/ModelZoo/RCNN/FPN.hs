@@ -5,8 +5,8 @@ import qualified RIO.NonEmpty                as NE (reverse, unzip, zip, (<|))
 
 import           MXNet.Base                  (ArgOf (..), HMap (..),
                                               SymbolHandle, at', internals,
-                                              (.&))
-import           MXNet.Base.Operators.Symbol (_UpSampling)
+                                              prim, (.&))
+import           MXNet.Base.Operators.Tensor (_UpSampling)
 import           MXNet.NN.Layer
 
 -- TODO
@@ -21,6 +21,7 @@ fpnFeatureExpander sym output_layers = do
     outputs <- liftIO $ newIORef (error "empty")
     sequential "fpn" $ do
         foldM_ (topDownPass outputs) Nothing (NE.zip layer_filters layers)
+    -- return features bottom-up (from big to small)
     liftIO $ readIORef outputs
 
   where

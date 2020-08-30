@@ -25,7 +25,7 @@ resnet50 num_classes x = do
     flt <- sequential "features" $ do
         u0 <- getFeature x resnet50Args
         u1 <- getTopFeature u0 resnet50Args
-        flatten (#data := u1 .& Nil)
+        flatten u1
     named "output"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
 resnet101Args = (#num_stages := 4
@@ -39,7 +39,7 @@ resset101 num_classes x = do
     flt <- sequential "features" $ do
         u0 <- getFeature x resnet101Args
         u1 <- getTopFeature u0 resnet101Args
-        flatten (#data := u1 .& Nil)
+        flatten u1
     named "dense0"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
 symbol :: Int -> Int -> Int -> Layer SymbolHandle
@@ -52,7 +52,7 @@ symbol num_classes num_layers image_size = do
     flt <- sequential "features" $ do
         u0 <- getFeature x args
         u1 <- getTopFeature u0 args
-        flatten (#data := u1 .& Nil)
+        flatten u1
 
     logits <- named "output" $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
     ret    <- named "softmax" $ softmaxoutput  (#data := logits .& #label := y .& Nil)
@@ -117,16 +117,16 @@ eps = 2e-5
 bn_mom :: Float
 bn_mom = 0.9
 
-type instance ParameterList "resnet" =
+type instance ParameterList "resnet" t =
   '[ '("num_stages" , 'AttrReq Int)
    , '("filter_list", 'AttrReq (NonEmpty Int))
    , '("units"      , 'AttrReq (NonEmpty Int))
    , '("bottle_neck", 'AttrReq Bool)
    , '("workspace"  , 'AttrReq Int)]
 
-getFeature :: (Fullfilled "resnet" args)
+getFeature :: (Fullfilled "resnet" () args)
            => SymbolHandle
-           -> ArgsHMap "resnet" args
+           -> ArgsHMap "resnet" () args
            -> Layer SymbolHandle
 getFeature inp args = do
     bnx <- batchnorm   (#data := inp
@@ -165,8 +165,8 @@ getFeature inp args = do
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
-getTopFeature :: (Fullfilled "resnet" args)
-              => SymbolHandle -> ArgsHMap "resnet" args -> Layer SymbolHandle
+getTopFeature :: (Fullfilled "resnet" () args)
+              => SymbolHandle -> ArgsHMap "resnet" () args -> Layer SymbolHandle
 getTopFeature inp args = do
     bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
     bn1 <- batchnorm   (#data := bdy -- 9
@@ -212,7 +212,7 @@ buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) =
     -- name unit_id = sformat ("features." % int % "." % int) (stage_id+5) unit_id
     resargs = #bottle_neck := bottle_neck .& #workspace := workspace .& #memonger := False .& Nil
 
-type instance ParameterList "_residual_layer(resnet)" =
+type instance ParameterList "_residual_layer(resnet)" t =
   '[ '("data"       , 'AttrReq SymbolHandle)
    , '("num_filter" , 'AttrReq Int)
    , '("stride"     , 'AttrReq [Int])
@@ -221,9 +221,9 @@ type instance ParameterList "_residual_layer(resnet)" =
    , '("bn_mom"     , 'AttrOpt Float)
    , '("workspace"  , 'AttrOpt Int)
    , '("memonger"   , 'AttrOpt Bool) ]
-residual :: (Fullfilled "_residual_layer(resnet)" args)
+residual :: (Fullfilled "_residual_layer(resnet)" () args)
          => (Int, Int)
-         -> ArgsHMap "_residual_layer(resnet)" args
+         -> ArgsHMap "_residual_layer(resnet)" () args
          -> Layer SymbolHandle
 residual (conv_id, bn_id) args = subscope_next_name $ do
     let dat        = args ! #data
@@ -306,7 +306,7 @@ residual (conv_id, bn_id) args = subscope_next_name $ do
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
 
-        named "plus" $ plus (#lhs := conv3 .& #rhs := shortcut .& Nil)
+        named "plus" $ add_ conv3 shortcut
 
       else do
         bn1  <- -- named (sformat ("batchnorm" % int) bn_id) $
@@ -360,5 +360,5 @@ residual (conv_id, bn_id) args = subscope_next_name $ do
         when memonger $
           liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
 
-        named "plus" $ plus (#lhs := conv2 .& #rhs := shortcut .& Nil)
+        named "plus" $ add_ conv2 shortcut
 
