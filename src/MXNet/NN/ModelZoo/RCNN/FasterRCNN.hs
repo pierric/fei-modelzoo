@@ -52,7 +52,7 @@ data RcnnConfiguration = RcnnConfiguration
     , rpn_bg_overlap       :: Float
     , rpn_allowd_border    :: Int
     , rcnn_num_classes     :: Int
-    , rcnn_pooled_size     :: [Int]
+    , rcnn_pooled_size     :: Int
     , rcnn_batch_rois      :: Int
     , rcnn_fg_fraction     :: Float
     , rcnn_fg_overlap      :: Float
@@ -64,6 +64,16 @@ data RcnnConfiguration = RcnnConfiguration
     , backbone             :: Backbone
     }
     deriving Show
+
+data FasterRCNN = FasterRCNN
+    { _rpn_loss         :: (SymbolHandle, SymbolHandle, SymbolHandle)
+    , _box_loss         :: (SymbolHandle, SymbolHandle)
+    , _cls_targets      :: SymbolHandle
+    , _roi_boxes        :: SymbolHandle
+    , _gt_matches       :: SymbolHandle
+    , _positive_indices :: SymbolHandle
+    , _top_feature      :: SymbolHandle
+    }
 
 stageList :: Backbone -> [Int]
 stageList RESNET50FPN = [2..5]
@@ -91,7 +101,7 @@ features1 RESNET50FPN dat = do
     sym <- Resnet.getFeature dat resnet50Args
     sym <- Resnet.getTopFeature sym resnet50Args
     fpnFeatureExpander sym
-        [ ("features.5.2.plus_output", 256)
+        [ ("features.5.2.plus_output", 256) -- TODO should 256 be rcnn_batch_rois istead
         , ("features.6.3.plus_output", 256)
         , ("features.7.5.plus_output", 256)
         , ("features.8.2.plus_output", 256) ]
@@ -224,7 +234,7 @@ rpn RcnnConfiguration{..} convFeats imInfo = unique "rpn" $ do
             ymax <- where_ cond h ymax
             return (xmin, ymin, xmax, ymax)
 
-alignROIs :: NonEmpty SymbolHandle -> SymbolHandle -> [Int] -> [Int] -> [Int] -> Layer _
+alignROIs :: NonEmpty SymbolHandle -> SymbolHandle -> [Int] -> Int -> [Int] -> Layer _
 alignROIs features rois stage_indices roi_pooled_size strides = do
     -- rois: (N, 5), batch_index, min_x, min_y, max_x, max_y
     let min_stage = head stage_indices
@@ -252,15 +262,15 @@ alignROIs features rois stage_indices roi_pooled_size strides = do
             masked <- where_ cond rois omit
             prim __contrib_ROIAlign (#data := feat
                                  .& #rois := masked
-                                 .& #pooled_size := roi_pooled_size
+                                 .& #pooled_size := [roi_pooled_size, roi_pooled_size]
                                  .& #spatial_scale := 1 / fromIntegral stride
                                  .& #sample_ratio := 2 .& Nil)
     features <- mapM align $ zip3 [max_stage,max_stage-1..min_stage] (NE.toList features) strides
     prim _add_n (#args := features .& Nil)
 
 
-symbolTrain :: RcnnConfiguration -> Layer SymbolHandle
-symbolTrain conf@RcnnConfiguration{..} =  do
+graph :: RcnnConfiguration -> Layer FasterRCNN
+graph conf@RcnnConfiguration{..} =  do
     -- dat: (B, image_height, image_width)
     dat <- variable "data"
     -- imInfo: (B, 3,)
@@ -309,12 +319,13 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             return (feat, rois_boxes, samples, matches)
 
         -- feat_aligned: (batch_size * rcnn_batch_rois, num_channels, feature_height, feature_width)
+        -- TODO num_channels is set to rcnn_batch_rois, it is coincidance or on purpose?
         -- Apply the remaining feature extraction layers
         top_feat <- features2 backbone feat_aligned
 
         unique "rcnn" $ do
             (cls_targets, bbox_targets, bbox_masks, positive_indices) <-
-                rcnnTargetGenerator batch_size
+                bboxTargetGenerator batch_size
                                     (rcnn_num_classes-1)
                                     (floor $ rcnn_fg_fraction * fromIntegral rcnn_batch_rois)
                                     samples
@@ -411,47 +422,26 @@ symbolTrain conf@RcnnConfiguration{..} =  do
             cls_targets   <- reshape [batch_size, -1] cls_targets >>= blockGrad
             rpn_cls_prob  <- blockGrad rpn_cls_prob
 
-            group $ [rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss, cls_prob, bbox_loss, cls_targets]
+            return $ FasterRCNN {
+                _rpn_loss = (rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss),
+                _box_loss = (cls_prob, bbox_loss),
+                _cls_targets = cls_targets,
+                _roi_boxes = roi_boxes,
+                _gt_matches = matches,
+                _positive_indices = positive_indices,
+                _top_feature = top_feat
+            }
 
 
-symbolInfer :: RcnnConfiguration -> Layer SymbolHandle
-symbolInfer conf@RcnnConfiguration{..} = error "no infer"
---    -- dat:
---    dat <- variable "data"
---    -- imInfo:
---    imInfo <- variable "im_info"
---
---    sequential "features" $ do
---        convFeat <- features1 backbone dat
---        (convFeat, rois, _, _) <- rpn conf convFeat imInfo
---
---        ---------------------------
---        -- cls_prob part
---        --
---        roiPool <- named "roi_pool" $ prim _ROIPooling
---                     (#data := convFeat
---                   .& #rois := rois
---                   .& #pooled_size := rcnn_pooled_size
---                   .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
---
---        topFeat <- features2 backbone roiPool
---
---        unique "rcnn" $ do
---            clsScore <- named "cls_score" $
---                        fullyConnected (#data := topFeat
---                                     .& #num_hidden := rcnn_num_classes .& Nil)
---            clsProb  <- named "cls_prob" $
---                        softmax (#data := clsScore .& Nil)
---
---            ---------------------------
---            -- bbox_loss part
---            --
---            bboxPred <- named "bbox_pred" $
---                        fullyConnected (#data := topFeat
---                                     .& #num_hidden := 4 * rcnn_num_classes .& Nil)
---
---            group [rois, clsProb, bboxPred]
+graphTrain conf = do
+    FasterRCNN{..} <- graph conf
+    let (rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss) = _rpn_loss
+        (cls_prob, bbox_loss) = _box_loss
+    group $ [rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss, cls_prob, bbox_loss, _cls_targets]
 
+
+--------------------------------
+-- Metrics
 --------------------------------
 data RPNAccMetric a = RPNAccMetric Text
 

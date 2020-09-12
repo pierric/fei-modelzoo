@@ -1,7 +1,7 @@
 module MXNet.NN.ModelZoo.RCNN.RCNN where
 
 import           RIO
-import           RIO.List                    (unzip3)
+import           RIO.List                    (unzip, unzip3, zip4)
 
 import           MXNet.Base
 import qualified MXNet.Base.Operators.Tensor as T
@@ -138,7 +138,7 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
                      slice_axis s 0 i (Just (i + 1))
 
 
-rcnnTargetGenerator :: Int -> Int -> Int
+bboxTargetGenerator :: Int -> Int -> Int
                     -> SymbolHandle
                     -> SymbolHandle
                     -> SymbolHandle
@@ -147,7 +147,7 @@ rcnnTargetGenerator :: Int -> Int -> Int
                     -> SymbolHandle
                     -> SymbolHandle
                     -> Layer (SymbolHandle, SymbolHandle, SymbolHandle, SymbolHandle)
-rcnnTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt_label gt_boxes mean std = do
+bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt_label gt_boxes mean std = do
     -- B: batch_size, N: num_rois, M: num_gt, N_pos: max_pos, C: num_fg_classes
     --
     -- samples: (B, N), value -1 (negative), 0 (ignore), 1 (positive)
@@ -221,4 +221,75 @@ rcnnTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     box_masks   <- mulBroadcast box_masks clsid_ohs
     -- return the index of positive masks because we will calculate box loss only on those items
     return (cls_targets, box_targets, box_masks, masks_sel)
+
+
+maskTargetGenerator :: Int -> Int -> Int
+                    -> SymbolHandle
+                    -> SymbolHandle
+                    -> SymbolHandle
+                    -> SymbolHandle
+                    -> Layer (SymbolHandle, SymbolHandle)
+maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cls_targets = do
+    -- rois: (B, N, 4), input proposals
+    -- gt_masks: (B, M, H, W), input masks of full image size
+    -- matches: (B, N), value [0, M), index to gt_label and gt_box.
+    -- cls_targets: (B, N), value [0, num_class), excluding background class.
+    --
+    -- returns:
+    --   mask_targets: (B, N, C, MS, MS), sampled masks.
+    --   box_weight:   (B, N, C, MS, MS), only foreground class has nonzero weight.
+
+    -- gt_masks (B, M, H, W) -> (B, M, 1, H, W) -> B * (M, 1, H, W)
+    gt_masks <- reshape [0, -4, -1, 1, 0, 0] gt_masks
+    gt_masks <- splitBySections batch_size 0 True gt_masks
+
+    -- rois (B, N, 4) -> B * (N, 4)
+    rois <- splitBySections batch_size 0 True rois
+
+    -- remove all -1 (setting to 0), (B, N) -> B * (N,)
+    matches <- prim T._relu (#data := matches .& Nil)
+    matches <- splitBySections batch_size 0 True matches
+
+    -- (B, N) -> B * (N,)
+    cls_targets <- splitBySections batch_size 0 True cls_targets
+
+    class_ids_fg <- prim T.__arange (#start := 0 .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
+    -- (C,) -> (1, C)
+    class_ids_fg <- reshape [1, -1] class_ids_fg
+
+    masks <- unique "make" $ mapM (make_target class_ids_fg) $ zip4 rois gt_masks matches cls_targets
+    let (mask_targets, mask_weights) = unzip masks
+
+    mask_targets <- stack 0 mask_targets
+    mask_weights <- stack 0 mask_weights
+    return (mask_targets, mask_weights)
+
+    where
+        make_target cids (roi, gt, match, cls_targets) = do
+            -- gt: (M, 1, H, W)
+            -- padded_rois: (N, 5), along the dim-2, gt_index (1) and rois_box (4)
+            match <- reshape [-1, 1] match
+            padded_rois <- concat_ (-1) [match, roi]
+            -- (N, 1, mask_size, mask_size)
+            pooled_mask <- prim T.__contrib_ROIAlign (#data := gt
+                                                   .& #rois := padded_rois
+                                                   .& #pooled_size := [mask_size, mask_size]
+                                                   .& #spatial_scale := 1
+                                                   .& #sample_ratio := 2 .& Nil)
+            -- (N,) -> (N,1)
+            cls_targets <- expandDims 1 cls_targets
+            -- (N,1) (1,C) -> (N,C)
+            cid_onehot <- eqBroadcast cls_targets cids
+
+            cid_onehot <- reshape [-2, 1, 1] cid_onehot
+            -- (N, C, mask_size, mask_size)
+            mask_weights <- prim T._broadcast_like
+                                (#lhs := cid_onehot
+                              .& #rhs := pooled_mask
+                              .& #lhs_axes := Just [2, 3]
+                              .& #rhs_axes := Just [2, 3] .& Nil)
+            -- (N, 1, mask_size, mask_size) -> (N, C, mask_size, mask_size)
+            mask_targets <- broadcastAxis [1] [num_fg_classes] pooled_mask
+            return (mask_targets, mask_weights)
+
 
