@@ -11,6 +11,7 @@ import           RIO.List                    (unzip3, zip3)
 import           RIO.List.Partial            (head, last)
 import qualified RIO.NonEmpty                as NE (toList)
 import qualified RIO.Text                    as T
+import qualified RIO.Vector.Storable.Partial as SV
 import qualified RIO.Vector.Unboxed          as UV
 import qualified RIO.Vector.Unboxed.Partial  as UV
 
@@ -21,8 +22,9 @@ import           MXNet.Base.Operators.Tensor (_Custom, _MakeLoss, __arange,
                                               __contrib_ROIAlign,
                                               __contrib_box_decode,
                                               __contrib_box_nms, _add_n, _clip,
-                                              _max, _min, _repeat, _sigmoid,
-                                              _smooth_l1, _transpose)
+                                              _max, _min, _norm, _one_hot,
+                                              _repeat, _sigmoid, _smooth_l1,
+                                              _transpose)
 import           MXNet.NN.EvalMetric
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
@@ -101,7 +103,7 @@ features1 RESNET50FPN dat = do
     sym <- Resnet.getFeature dat resnet50Args
     sym <- Resnet.getTopFeature sym resnet50Args
     fpnFeatureExpander sym
-        [ ("features.5.2.plus_output", 256) -- TODO should 256 be rcnn_batch_rois istead
+        [ ("features.5.2.plus_output", 256)
         , ("features.6.3.plus_output", 256)
         , ("features.7.5.plus_output", 256)
         , ("features.8.2.plus_output", 256) ]
@@ -341,7 +343,7 @@ graph conf@RcnnConfiguration{..} =  do
             -- rpn_cls_targets: (B, num_rois, 1)
             rpn_cls_prob <- prim _sigmoid (#data := rpn_raw_scores .& Nil)
             a  <- log2_ rpn_cls_prob
-            ra <- rsubScalar 1 rpn_cls_prob >>= log2_
+            ra <- log2_ =<< rsubScalar 1 rpn_cls_prob
             b  <- identity rpn_cls_targets
             rb <- rsubScalar 1 rpn_cls_targets
             rpn_cls_loss <- (join $ liftM2 add_ (mul_ a b) (mul_ ra rb)) >>= rsubScalar 0
@@ -439,228 +441,6 @@ graphTrain conf = do
         (cls_prob, bbox_loss) = _box_loss
     group $ [rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss, cls_prob, bbox_loss, _cls_targets]
 
-
---------------------------------
--- Metrics
---------------------------------
-data RPNAccMetric a = RPNAccMetric Text
-
-instance EvalMetricMethod RPNAccMetric where
-    data MetricData RPNAccMetric a = RPNAccMetricData Text Text (IORef Int) (IORef Int)
-    newMetric phase (RPNAccMetric label) = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
-        return $ RPNAccMetricData phase label a b
-
-    formatMetric (RPNAccMetricData _ _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RPNAcc: " % fixed 2 % ">") (100 * fromIntegral s / fromIntegral n :: Float)
-
-    evalMetric (RPNAccMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
-        -- rpn class pred: (B, rpn_post_topk, 1)
-        -- rpn class label: (B, rpn_post_topk, 1)
-        pred  <- toRepa @DIM3 (outputs  ^?! ix 0)
-        label <- toRepa @DIM3 (bindings ^?! ix lname)
-
-        let pred_thr = Repa.map (\v -> if v > 0.5 then 1 else 0) pred
-            matches  = Repa.zipWith (\v w -> if v == w then 1 else 0) pred_thr label
-            valid_mask = Repa.map (\v -> if v >= 0 then 1 else 0) label
-
-        num_valid   <- Repa.sumAllP valid_mask
-        num_matches <- Repa.sumAllP matches
-
-        modifyIORef' sumRef (+ num_matches)
-        modifyIORef' cntRef (+ num_valid)
-
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = fromIntegral s / fromIntegral n
-        return $ M.singleton (phase `T.append` "_acc") acc
-
-
-data RCNNAccMetric a = RCNNAccMetric
-
-instance EvalMetricMethod RCNNAccMetric where
-    data MetricData RCNNAccMetric a = RCNNAccMetricData {
-        _rcnn_acc_phase :: Text,
-        _rcnn_acc_fg  :: IORef (Int, Int)
-    }
-    newMetric phase RCNNAccMetric = do
-        a <- liftIO $ newIORef (0, 0)
-        return $ RCNNAccMetricData phase a
-
-    formatMetric (RCNNAccMetricData _ accum_fg) = liftIO $ do
-        (fg_s, fg_n)   <- liftIO $ readIORef accum_fg
-        return $ sformat ("<RCNNAcc: " % fixed 2 % ">")
-            (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
-
-    evalMetric rcnn_acc _ outputs = liftIO $  do
-        -- cls_prob: (B, num_pos_rois, rcnn_num_classes)
-        -- label:    (B, num_pos_rois)
-        let cls_prob = outputs ^?! ix 3
-
-        label <- toRepa @DIM2 (outputs ^?! ix 5)
-        cls_prob   <- A.makeNDArrayLike cls_prob contextCPU >>= copy cls_prob
-        pred_class <- argmax cls_prob (Just 2) False
-        pred_class <- toRepa @DIM2 pred_class
-
-        num_matches <- Repa.sumAllP $ Repa.zipWith (\v w -> if v == w && w > 0 then 1 else 0) pred_class label
-        num_fg  <- Repa.sumAllP $ Repa.map (\v -> if v > 0 then 1 else 0) label
-
-        let ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
-        modifyIORef' ref_acc_fg  (bimap (+ num_matches) (+ num_fg))
-
-        (fg_s,  fg_n)  <- readIORef ref_acc_fg
-        let fg_acc  = fromIntegral fg_s  / fromIntegral fg_n
-            phase   = _rcnn_acc_phase rcnn_acc
-        return $ M.fromList [(phase `T.append` "_acc", fg_acc)]
-
-data RPNLogLossMetric a = RPNLogLossMetric Text
-
-instance EvalMetricMethod RPNLogLossMetric where
-    data MetricData RPNLogLossMetric a = RPNLogLossMetricData Text Text (IORef Int) (IORef Double)
-    newMetric phase (RPNLogLossMetric lname) = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
-        return $ RPNLogLossMetricData phase lname a b
-
-    formatMetric (RPNLogLossMetricData _ _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RPNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
-
-    evalMetric (RPNLogLossMetricData phase lname cntRef sumRef) bindings outputs = liftIO $  do
-        let pred  = outputs  ^?! ix 0
-            label = bindings ^?! ix lname
-
-        -- both pred and label: (B, rpn_post_topk, 1)
-        label <- reshape [-1] label
-        label <- toRepa @DIM1 label
-        pred  <- reshape [-1] pred
-        pred  <- toRepa @DIM1 pred
-
-        let Z :. size = Repa.extent label
-            ep = constant (Z :. size) 1e-14
-            one = constant (Z :. size) 1
-
-        -- dropping all item labeled -1
-        pred  <- Repa.selectP (\i -> label ^?! ixr (Z:.i) >= 0) (\i -> pred  ^?! ixr (Z:.i)) size
-        label <- Repa.selectP (\i -> label ^?! ixr (Z:.i) >= 0) (\i -> label ^?! ixr (Z:.i)) size
-        let Z:.num_valid = Repa.extent label
-
-        let a = Repa.map log (pred Repa.+^ ep) Repa.*^ label
-            b = Repa.map log (one Repa.-^ pred Repa.+^ ep) Repa.*^ (one Repa.-^ label)
-            ce = Repa.map (0-) $ a Repa.+^ b
-        cls_loss_val <- realToFrac <$> Repa.sumAllP ce
-        modifyIORef' sumRef (+ cls_loss_val)
-        modifyIORef' cntRef (+ num_valid)
-
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = s / fromIntegral n
-        return $ M.singleton (phase `T.append` "_acc") acc
-
-data RCNNLogLossMetric a = RCNNLogLossMetric
-
-instance EvalMetricMethod RCNNLogLossMetric where
-    data MetricData RCNNLogLossMetric a = RCNNLogLossMetricData Text (IORef Int) (IORef Double)
-    newMetric phase RCNNLogLossMetric = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
-        return $ RCNNLogLossMetricData phase a b
-
-    formatMetric (RCNNLogLossMetricData _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RCNNLogLoss: " % fixed 4 % ">") (realToFrac s / fromIntegral n :: Float)
-
-    evalMetric (RCNNLogLossMetricData phase cntRef sumRef) _ outputs = liftIO $  do
-        -- rcnn class prediction: (B, rcnn_batch_rois, rcnn_num_classes)
-        cls_prob <- toRepa @DIM3 (outputs ^?! ix 3)
-        -- rcnn generated class target: (B, rcnn_batch_rois), value [0, rcnn_num_classes] or -1
-        label    <- toRepa @DIM2 (outputs ^?! ix 5)
-
-        -- _pred_cls <- argmax (outputs ^?! ix 3) (Just 2) False
-        -- _pred_cls <- UV.convert <$> toVector _pred_cls
-        -- _label    <- UV.convert <$> toVector (outputs ^?! ix 5)
-        -- _pred_cls <- return (UV.map floor _pred_cls :: UV.Vector Int)
-        -- _label    <- return (UV.map floor _label    :: UV.Vector Int)
-        -- let _cmp = UV.filter ((>0) . snd) $ UV.zip _pred_cls _label
-        -- traceShowM _cmp
-
-        let lbl_shp@(Z :. _ :. num_rois) = Repa.extent label
-            ce = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) ->
-                    let target = floor $ label `Repa.index` pos
-                        prob   = cls_prob `Repa.index` (Z :. bi :. ai :. target)
-                        eps    = 1e-14
-                     in if target == -1 then 0 else - log (eps + prob))
-
-        ce <- Repa.sumAllP ce
-        num_valid <- Repa.sumAllP $ Repa.map (\v -> if v == -1 then 0 else 1) label
-        modifyIORef' sumRef (+ realToFrac ce)
-        modifyIORef' cntRef (+ num_valid)
-
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = s / fromIntegral n
-        return $ M.singleton (phase `T.append` "_acc") acc
-
-data RPNL1LossMetric a = RPNL1LossMetric
-
-instance EvalMetricMethod RPNL1LossMetric where
-    data MetricData RPNL1LossMetric a = RPNL1LossMetricData Text (IORef Int) (IORef Double)
-    newMetric phase RPNL1LossMetric = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
-        return $ RPNL1LossMetricData phase a b
-
-    formatMetric (RPNL1LossMetricData _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RPNL1Loss: " % fixed 3 % ">") (realToFrac s / fromIntegral n :: Float)
-
-    evalMetric (RPNL1LossMetricData phase cntRef sumRef) bindings outputs = liftIO $  do
-        bbox_loss <- toRepa @DIM3 (outputs ^?! ix 2)
-        all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
-        let Z:.batch_size:._:._ = Repa.extent bbox_loss
-
-        modifyIORef' sumRef (+ realToFrac all_loss)
-        modifyIORef' cntRef (+ batch_size)
-
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = s / fromIntegral n
-        return $ M.singleton (phase `T.append` "_acc") acc
-
-data RCNNL1LossMetric a = RCNNL1LossMetric
-
-instance EvalMetricMethod RCNNL1LossMetric where
-    data MetricData RCNNL1LossMetric a = RCNNL1LossMetricData Text (IORef Int) (IORef Double)
-    newMetric phase RCNNL1LossMetric = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
-        return $ RCNNL1LossMetricData phase a b
-
-    formatMetric (RCNNL1LossMetricData _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ sformat ("<RCNNL1Loss: " % fixed 5 % ">") (realToFrac s / fromIntegral n :: Float)
-
-    evalMetric (RCNNL1LossMetricData phase cntRef sumRef) _ outputs = liftIO $ do
-        -- rcnn box loss: (B, num_pos_rois, num_fg_classes, 4)
-        bbox_loss <- toRepa @DIM4 (outputs ^?! ix 4)
-        all_loss  <- Repa.sumAllP $ Repa.map abs bbox_loss
-
-        let Z:.batch_size:._:._:._ = Repa.extent bbox_loss
-
-        modifyIORef' sumRef (+ realToFrac all_loss)
-        modifyIORef' cntRef (+ batch_size)
-
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = s / fromIntegral n
-        return $ M.singleton (phase `T.append` "_acc") acc
 
 constant :: (Shape sh, UV.Unbox a) => sh -> a -> Repa.Array Repa.U sh a
 constant shp val = Repa.fromListUnboxed shp (replicate (size shp) val)

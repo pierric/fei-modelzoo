@@ -87,7 +87,7 @@ graph conf@(FasterRCNN.RcnnConfiguration{..}) = do
                                                             gt_matches
                                                             cls_targets
         masks_loss <- unique "loss" $ do
-            masks_loss   <- sigmoidBCE masks mask_targets mask_weights
+            masks_loss   <- sigmoidBCE masks mask_targets (Just mask_weights)
             num_pos_avg  <- sum_ mask_weights Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
             masks_loss   <- divBroadcast masks_loss num_pos_avg
             prim T._MakeLoss (#data := masks_loss .& #grad_scale := 1.0 .& Nil)
