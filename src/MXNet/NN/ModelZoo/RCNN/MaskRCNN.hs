@@ -13,6 +13,10 @@ data MaskRCNN = MaskRCNN
     { _faster_rcnn_result :: FasterRCNN.FasterRCNN
     , _masks_loss         :: SymbolHandle
     }
+    | MaskRCNNInferenceOnly
+    { _faster_rcnn_result :: FasterRCNN.FasterRCNN
+    , _masks              :: SymbolHandle
+    }
 
 maskHead :: SymbolHandle -> Int -> Int -> Int -> Int -> Layer SymbolHandle
 maskHead top_feat num_fcn_conv num_fg_classes batch_size num_mask_channels = do
@@ -45,9 +49,11 @@ maskHead top_feat num_fcn_conv num_fg_classes batch_size num_mask_channels = do
                            .& #pad := [1, 1] .& Nil)
             activation (#data := x .& #act_type := #relu .& Nil)
 
-graph conf@(FasterRCNN.RcnnConfiguration{..}) = do
+
+graphT :: FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN, SymbolHandle)
+graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
     gt_masks <- variable "gt_masks"
-    fr@FasterRCNN.FasterRCNN{..} <- FasterRCNN.graph conf
+    (fr@FasterRCNN.FasterRCNN{..}, fr_outputs) <- FasterRCNN.graphT conf
     unique "mask" $ do
         let take_pos t = do
                 ts <- forM ([0..batch_size-1] :: [_]) $ \i -> do
@@ -92,15 +98,22 @@ graph conf@(FasterRCNN.RcnnConfiguration{..}) = do
             masks_loss   <- divBroadcast masks_loss num_pos_avg
             prim T._MakeLoss (#data := masks_loss .& #grad_scale := 1.0 .& Nil)
 
-        return $ MaskRCNN {
+        result_sym <- group $ [fr_outputs, masks_loss]
+        return $ (MaskRCNN {
             _faster_rcnn_result = fr,
             _masks_loss = masks_loss
-        }
+        }, result_sym)
 
-
-graphTrain conf = do
-    MaskRCNN{..} <- graph conf
-    let FasterRCNN.FasterRCNN{..} = _faster_rcnn_result
-        (rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss) = _rpn_loss
-        (cls_prob, bbox_loss) = _box_loss
-    group $ [rpn_cls_prob, rpn_cls_loss, rpn_bbox_loss, cls_prob, bbox_loss, _cls_targets, _masks_loss]
+graphI :: FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN, SymbolHandle)
+graphI conf@(FasterRCNN.RcnnConfigurationInference{..}) = do
+    (fr@FasterRCNN.FasterRCNNInferenceOnly{..}, fr_outputs) <- FasterRCNN.graphI conf
+    feature <- reshape [batch_size, -1, 0, 0, 0] =<< expandDims 0 _top_feature
+    let num_fcn_conv = case backbone of
+                         FasterRCNN.RESNET50FPN -> 4
+                         _                      -> 0
+        num_fg_classes = rcnn_num_classes-1
+    masks <- unique "mask_head" $ maskHead feature num_fcn_conv num_fg_classes batch_size 256
+    masks <- prim T._sigmoid (#data := masks .& Nil)
+    res_sym <- group [fr_outputs, masks]
+    let res_data = MaskRCNNInferenceOnly fr masks
+    return (res_data, res_sym)

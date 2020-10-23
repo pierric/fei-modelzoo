@@ -1,7 +1,7 @@
 module MXNet.NN.ModelZoo.RCNN.RCNN where
 
 import           RIO
-import           RIO.List                    (unzip, unzip3, zip4)
+import           RIO.List                    (unzip, unzip3, unzip4, zip4)
 
 import           MXNet.Base
 import qualified MXNet.Base.Operators.Tensor as T
@@ -10,7 +10,7 @@ import           MXNet.NN.Layer
 
 rcnnSampler :: Int -> Int -> Int -> Float -> Float -> Int
             -> SymbolHandle -> SymbolHandle -> SymbolHandle
-            -> Layer (SymbolHandle, SymbolHandle, SymbolHandle)
+            -> Layer _
 rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
             rois scores gt_boxes = do
     -- B: batch_size, N: num_proposal (post-topk), S: num_sample (rcnn_batch_rois)
@@ -37,12 +37,13 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
 
           -- why sum up the coordinates as score?
           -- because of padding gt are coded as all -1
-          gt_score <- sum_ gt_box (Just [(-1)]) True
-          gt_score <- addScalar 1 gt_score
+          gt_score <- addScalar 1 =<< sum_ gt_box (Just [(-1)]) True
           gt_score <- prim T._sign (#data := gt_score .& Nil)
 
+          -- all_rois   (N+M, 4)
+          -- all_scores (N+M,)
           all_rois   <- concat_ 0 [roi, gt_box]
-          all_scores <- concat_ 0 [score, gt_score]
+          all_scores <- concat_ 0 [score, gt_score] >>= squeeze (Just [-1])
 
           ious <- prim T.__contrib_box_iou (#lhs := all_rois
                                          .& #rhs := gt_box
@@ -75,10 +76,8 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           ious_argmax <- takeI index ious_argmax
 
           -- sort in order of pos, neg, ignore
-          order <- prim T._argsort (#data := mask .& #is_ascend := False .& Nil)
           let max_pos = floor $ fromIntegral num_sample * fg_fraction
-          -- topk
-          topk  <- slice_axis order 0 0 (Just max_pos)
+          topk <- prim T._topk (#data := mask .& #k := max_pos .& #is_ascend := False .& Nil)
           topk_indices <- takeI topk index
           topk_samples <- takeI topk mask
           topk_matches <- takeI topk ious_argmax
@@ -102,10 +101,9 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           class_4 <- onesLike mask >>= mulScalar 4
           cond    <- eqScalar 2 mask
           mask    <- where_ cond class_4 mask
-          order   <- prim T._argsort (#data := mask .& #is_ascend := False .& Nil)
 
           let num_neg = num_sample - max_pos
-          bottomk <- slice_axis order 0 0 (Just num_neg)
+          bottomk <- prim T._topk (#data := mask .& #k := num_neg .& #is_ascend := False .& Nil)
           bottomk_indices <- takeI bottomk index
           bottomk_samples <- takeI bottomk mask
           bottomk_matches <- takeI bottomk ious_argmax
@@ -147,7 +145,7 @@ bboxTargetGenerator :: Int -> Int -> Int
                     -> SymbolHandle
                     -> SymbolHandle
                     -> Layer (SymbolHandle, SymbolHandle, SymbolHandle, SymbolHandle)
-bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt_label gt_boxes mean std = do
+bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt_label gt_boxes means stds = do
     -- B: batch_size, N: num_rois, M: num_gt, N_pos: max_pos, C: num_fg_classes
     --
     -- samples: (B, N), value -1 (negative), 0 (ignore), 1 (positive)
@@ -155,8 +153,6 @@ bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     -- anchors: (B, N, 4), anchor boxes, min_x, min_y, max_x, max_y
     -- gt_label: (B, M), value range [0, num_fg_classes), excluding background class
     -- gt_boxes: (B, N, 4), gt boxes, min_x, min_y, max_x, max_y
-    -- mean: (4,)
-    -- std:  (4,)
     --
     -- returns:
     --   cls_targets: (B, N_pos), value [0, num_classes], -1 to be ignored
@@ -164,28 +160,14 @@ bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     --   box_masks:   (B, N_pos, C, 4)
     --   mask_sel:    (B, N_pos)
     --
-    labels <- reshape [0, 1, -1] gt_label
-    labels <- prim T._broadcast_like (#lhs := labels .& #rhs := matches .& #lhs_axes := Just [1] .& #rhs_axes := Just [1] .& Nil)
-    -- labels: (B,N,M) forall batch, roi, gt. class id
-    -- fg_cls_targets: (B,N) forall batch, roi, class id of the best gt
-    fg_cls_targets <- pick (#data := labels .& #index := matches .& #axis := Just 2 .& Nil)
-    -- shift by 1, reserve 0 for the background class
-    cls_targets <- addScalar 1 fg_cls_targets
-
-    ign <- onesLike cls_targets >>= mulScalar (-1)
-    bck <- zerosLike cls_targets
-    pos <- gtScalar 0.5 samples
-    neg <- ltScalar (-0.5) samples
-    -- [1, num_fg_classes] for fg, 0 for background, -1 for being ignored
-    cls_targets <- where_ pos cls_targets ign
-    cls_targets <- where_ neg bck cls_targets
+    (fg_cls_targets, cls_targets) <- multiClassEncode gt_label samples matches
 
     ret <- prim T.__contrib_box_encode (#samples := samples
                                      .& #matches := matches
                                      .& #anchors := anchors
                                      .& #refs    := gt_boxes
-                                     .& #means   := mean
-                                     .& #stds    := std .& Nil)
+                                     .& #means   := means
+                                     .& #stds    := stds .& Nil)
     [box_targets, box_masks] <- mapM (ret `at`) ([0, 1] :: [Int])
 
     fg_cls_targets <- expandDims 2 fg_cls_targets
@@ -293,3 +275,51 @@ maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cl
             return (mask_targets, mask_weights)
 
 
+multiClassEncode gt_label samples matches = do
+    -- gt_label: (B, M), value range [0, num_fg_classes), excluding background class
+    -- samples:  (B, N), value -1 (negative), 0 (ignore), 1 (positive)
+    -- matches:  (B, N), value range [0, M), the best-matched gt of each roi
+    labels <- reshape [0, 1, -1] gt_label
+    labels <- prim T._broadcast_like (#lhs := labels .& #rhs := matches .& #lhs_axes := Just [1] .& #rhs_axes := Just [1] .& Nil)
+    -- labels: (B,N,M) forall batch, roi, gt. class id
+    -- fg_cls_targets: (B,N) forall batch, roi, class id of the best gt
+    fg_cls_targets <- pick (#data := labels .& #index := matches .& #axis := Just 2 .& Nil)
+    -- shift by 1, reserve 0 for the background class
+    cls_targets <- addScalar 1 fg_cls_targets
+
+    ign <- onesLike cls_targets >>= mulScalar (-1)
+    bck <- zerosLike cls_targets
+    pos <- gtScalar 0.5 samples
+    neg <- ltScalar (-0.5) samples
+    -- [1, num_fg_classes] for fg, 0 for background, -1 for being ignored
+    cls_targets <- where_ pos cls_targets ign
+    cls_targets <- where_ neg bck cls_targets
+
+    return (fg_cls_targets, cls_targets)
+
+
+multiClassDecodeWithClsId num_classes axis threshold prediction = do
+    -- num_classes: number of classes, including the background class
+    -- axis: the axis where the class prediction is
+    -- threshold: prediction under the threshold will be masked
+    -- prediction: (B, N, num_classes), predicated probablities
+    -- return:
+    --      cls_ids: (B, N, num_classes-1)
+    --      pred_fg: (B, N, num_classes-1)
+    let num_fg_classes = num_classes - 1
+    pred_fg <- slice_axis prediction axis 1 Nothing
+
+    -- make a (B, N, num_fg_classes) of values [0..num_fg_classes-1]
+    zero <- zerosLike =<< slice_axis prediction axis 0 (Just 1)
+    cls_ids <- reshape [1, 1, num_fg_classes]
+                =<< prim T.__arange (#start := 0
+                                  .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
+    cls_ids <- addBroadcast zero cls_ids
+
+    mask <- gtScalar threshold pred_fg
+    ign1 <- zerosLike pred_fg
+    ign2 <- mulScalar (-1) =<< onesLike cls_ids
+    pred_fg <- where_ mask pred_fg ign1
+    cls_ids <- where_ mask cls_ids ign2
+
+    return (cls_ids, pred_fg)
