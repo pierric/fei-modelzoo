@@ -382,17 +382,19 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             -- rpn_raw_scores: (B, num_rois, 1)
             -- rpn_cls_targets: (B, num_rois, 1)
             rpn_cls_prob <- prim _sigmoid (#data := rpn_raw_scores .& Nil)
-            a  <- log2_ rpn_cls_prob
-            ra <- log2_ =<< rsubScalar 1 rpn_cls_prob
-            b  <- identity rpn_cls_targets
-            rb <- rsubScalar 1 rpn_cls_targets
-            rpn_cls_loss <- (join $ liftM2 add_ (mul_ a b) (mul_ ra rb)) >>= rsubScalar 0
+            sample_mask  <- geqScalar 0 rpn_cls_targets
+            rpn_cls_loss <- sigmoidBCE rpn_raw_scores rpn_cls_targets (Just sample_mask) AggSum
+            -- a  <- log2_ rpn_cls_prob
+            -- ra <- log2_ =<< rsubScalar 1 rpn_cls_prob
+            -- b  <- identity rpn_cls_targets
+            -- rb <- rsubScalar 1 rpn_cls_targets
+            -- rpn_cls_loss <- (join $ liftM2 add_ (mul_ a b) (mul_ ra rb)) >>= rsubScalar 0
 
             -- average number of targets per batch example
             cls_mask <- geqScalar 0 rpn_cls_targets
             num_pos_avg  <- sum_ cls_mask Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
 
-            rpn_cls_loss <- mul_ rpn_cls_loss cls_mask >>= flip divBroadcast num_pos_avg
+            rpn_cls_loss <- divBroadcast rpn_cls_loss num_pos_avg
             rpn_cls_loss <- prim _MakeLoss (#data := rpn_cls_loss .& #grad_scale := 1.0 .& Nil)
 
             rpn_bbox_reg  <- sub_ rpn_raw_boxregs rpn_box_targets
