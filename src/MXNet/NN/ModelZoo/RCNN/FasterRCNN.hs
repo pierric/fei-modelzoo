@@ -1,37 +1,24 @@
 module MXNet.NN.ModelZoo.RCNN.FasterRCNN where
 
-import           Control.Lens                (bimap, ix, (^?!))
-import qualified Data.Array.Repa             as Repa
-import           Data.Array.Repa.Index
-import           Data.Array.Repa.Shape
-import           Formatting
 import           RIO
-import qualified RIO.HashMap                 as M
 import           RIO.List                    (unzip3, zip3, zip4)
 import           RIO.List.Partial            (head, last)
 import qualified RIO.NonEmpty                as NE (toList)
-import qualified RIO.Text                    as T
-import qualified RIO.Vector.Storable.Partial as SV
-import qualified RIO.Vector.Unboxed          as UV
-import qualified RIO.Vector.Unboxed.Partial  as UV
 
 import           MXNet.Base
-import qualified MXNet.Base.NDArray          as A
 import           MXNet.Base.Operators.Tensor (_Custom, _MakeLoss, __arange,
                                               __contrib_AdaptiveAvgPooling2D,
                                               __contrib_ROIAlign,
                                               __contrib_box_decode,
                                               __contrib_box_nms, __zeros,
-                                              _add_n, _clip, _max, _min, _norm,
-                                              _one_hot, _repeat, _sigmoid,
+                                              _add_n, _clip,
+                                              _repeat, _sigmoid,
                                               _smooth_l1, _transpose)
-import           MXNet.NN.EvalMetric
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
 import           MXNet.NN.ModelZoo.RCNN.RCNN
 import qualified MXNet.NN.ModelZoo.Resnet    as Resnet
 import qualified MXNet.NN.ModelZoo.VGG       as VGG
-import           MXNet.NN.Utils.Repa
 
 data Backbone = VGG16
     | RESNET50
