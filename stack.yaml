@@ -11,12 +11,10 @@ extra-deps:
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
   commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
-- hlint-2.1.17
-- hip-1.5.4.0
 extra-include-dirs:
 - /home/jiasen/workspace/mxnet/build-1.6.0/include
 extra-lib-dirs:
 - /home/jiasen/workspace/mxnet/build-1.6.0
 flags:
   fei-base:
-      mxnet_1_6: true
+      mxnet_geq_10600: true

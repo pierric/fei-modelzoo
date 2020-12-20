@@ -1,16 +1,16 @@
+cabal-version:              2.4
 name:                       fei-modelzoo
-version:                    0.2.0
+version:                    1.0.0
 synopsis:                   A collection of standard models
 description:                A collection of standard models
 homepage:                   http://github.com/pierric/fei-modelzoo
-license:                    BSD3
+license:                    BSD-3-Clause
 license-file:               LICENSE
 author:                     Jiasen Wu
 maintainer:                 jiasenwu@hotmail.com
-copyright:                  Copyright: (c) 2020 Jiasen Wu
+copyright:                  2020 - Jiasen Wu
 category:                   Machine Learning, AI
 build-type:                 Simple
-cabal-version:              1.24
 
 Library
     exposed-modules:        MXNet.NN.ModelZoo.Lenet
