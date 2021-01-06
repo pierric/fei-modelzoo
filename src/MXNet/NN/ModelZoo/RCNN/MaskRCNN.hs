@@ -47,7 +47,7 @@ maskHead top_feat num_fcn_conv num_fg_classes batch_size num_mask_channels = do
                            .& #kernel := [3, 3]
                            .& #stride := [1, 1]
                            .& #pad := [1, 1] .& Nil)
-            activation (#data := x .& #act_type := #relu .& Nil)
+            unique' $ activation (#data := x .& #act_type := #relu .& Nil)
 
 
 graphT :: FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN, SymbolHandle)
@@ -92,17 +92,21 @@ graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
                                                             roi_boxes
                                                             gt_matches
                                                             cls_targets
-        masks_loss <- unique "loss" $ do
-            masks_loss   <- sigmoidBCE masks mask_targets (Just mask_weights) AggSum
-            num_pos_avg  <- sum_ mask_weights Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
-            masks_loss   <- divBroadcast masks_loss num_pos_avg
-            prim T._MakeLoss (#data := masks_loss .& #grad_scale := 1.0 .& Nil)
+        unique "loss" $ do
+            masks_loss  <- sigmoidBCE masks mask_targets (Just mask_weights) AggSum
+            masks_loss  <- sum_ masks_loss Nothing False
+            num_pos_avg <- sum_ mask_weights Nothing False
+                            >>= divScalar (fromIntegral batch_size)
+                            >>= addScalar 1e-14
+                            >>= blockGrad
+            masks_loss  <- div_ masks_loss num_pos_avg
+            masks_loss  <- prim T._MakeLoss (#data := masks_loss .& #grad_scale := 1.0 .& Nil)
 
-        result_sym <- group $ [fr_outputs, masks_loss]
-        return $ (MaskRCNN {
-            _faster_rcnn_result = fr,
-            _masks_loss = masks_loss
-        }, result_sym)
+            result_sym <- group $ [fr_outputs, masks_loss]
+            return $ (MaskRCNN {
+                _faster_rcnn_result = fr,
+                _masks_loss = masks_loss
+            }, result_sym)
 
 graphI :: FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN, SymbolHandle)
 graphI conf@(FasterRCNN.RcnnConfigurationInference{..}) = do

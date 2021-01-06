@@ -11,8 +11,7 @@ import           MXNet.Base.Operators.Tensor (_Custom, _MakeLoss, __arange,
                                               __contrib_ROIAlign,
                                               __contrib_box_decode,
                                               __contrib_box_nms, __zeros,
-                                              _add_n, _clip,
-                                              _repeat, _sigmoid,
+                                              _add_n, _clip, _repeat, _sigmoid,
                                               _smooth_l1, _transpose)
 import           MXNet.NN.Layer
 import           MXNet.NN.ModelZoo.RCNN.FPN
@@ -381,12 +380,14 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             cls_mask <- geqScalar 0 rpn_cls_targets
             num_pos_avg  <- sum_ cls_mask Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
 
-            rpn_cls_loss <- divBroadcast rpn_cls_loss num_pos_avg
+            -- rpn_cls_loss: (B,)
+            rpn_cls_loss <- sum_ rpn_cls_loss Nothing False >>= flip div_ num_pos_avg
             rpn_cls_loss <- prim _MakeLoss (#data := rpn_cls_loss .& #grad_scale := 1.0 .& Nil)
 
             rpn_bbox_reg  <- sub_ rpn_raw_boxregs rpn_box_targets
             rpn_bbox_reg  <- prim _smooth_l1 (#data := rpn_bbox_reg .& #scalar := 3.0 .& Nil)
-            rpn_bbox_loss <- mul_ rpn_bbox_reg rpn_box_masks >>= flip divBroadcast num_pos_avg
+            rpn_bbox_loss <- mul_ rpn_bbox_reg rpn_box_masks
+            rpn_bbox_loss <- sum_ rpn_bbox_loss Nothing False >>= flip div_ num_pos_avg
             rpn_bbox_loss <- prim _MakeLoss
                                 (#data := rpn_bbox_loss .& #grad_scale := 1.0 .& Nil)
 
@@ -447,7 +448,8 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             bbox_pred <- reshape [batch_size, -1, rcnn_num_classes - 1, 4] bbox_pred
             bbox_reg  <- sub_ bbox_pred bbox_targets
             bbox_reg  <- prim _smooth_l1 (#data := bbox_reg .& #scalar := 1.0 .& Nil)
-            bbox_loss <- mul_ bbox_reg bbox_masks >>= flip divBroadcast avg_valid_pred
+            bbox_loss <- mul_ bbox_reg bbox_masks
+            bbox_loss <- sum_ bbox_loss Nothing False >>= flip div_ avg_valid_pred
             bbox_loss <- prim _MakeLoss (#data := bbox_loss .& #grad_scale := 1.0 .& Nil)
 
             cls_targets   <- reshape [batch_size, -1] cls_targets >>= blockGrad
