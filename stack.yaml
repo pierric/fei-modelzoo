@@ -1,8 +1,9 @@
 # GHC 8.0.2 has a bug, which may leads to OOM
 # https://ghc.haskell.org/trac/ghc/ticket/13615
-resolver: lts-14.27
+resolver: lts-17.2
 packages:
 - .
+- ../fei-einops
 - ../fei-nn
 - ../fei-base
 - ../tuple-ops
@@ -10,7 +11,7 @@ extra-deps:
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
-  commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
+  commit: 792ec73bc3b0e8d4aa2683af6b2a3fc03b5f8d95
 extra-include-dirs:
 - /home/jiasen/workspace/mxnet/build-1.6.0/include
 extra-lib-dirs:
