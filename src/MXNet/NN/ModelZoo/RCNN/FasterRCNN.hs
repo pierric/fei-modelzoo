@@ -234,11 +234,11 @@ rpn conf convFeats imInfo = unique "rpn" $ do
                                         .& #score_index := 0
                                         .& #id_index    := (-1)
                                         .& #force_suppress := True .& Nil)
-            tmp <- slice_axis tmp 1 0 (Just $ rpn_post_topk conf)
+            tmp <- sliceAxis tmp 1 0 (Just $ rpn_post_topk conf)
             rpn_roi_scores <- blockGrad =<<
-                              slice_axis tmp (-1) 0 (Just 1)
+                              sliceAxis tmp (-1) 0 (Just 1)
             rpn_roi_boxes  <- blockGrad =<<
-                              slice_axis tmp (-1) 1 Nothing
+                              sliceAxis tmp (-1) 1 Nothing
             return (rpn_roi_scores, rpn_roi_boxes)
 
         bbox_clip_to_image rois info = do
@@ -311,8 +311,8 @@ graphT conf@RcnnConfigurationTrain{..} =  do
     rpn_box_targets <- variable "rpn_box_targets"
     rpn_box_masks   <- variable "rpn_box_masks"
 
-    gt_labels <- unique' $ slice_axis gt_boxes (-1) 4 Nothing
-    gt_boxes  <- unique' $ slice_axis gt_boxes (-1) 0 (Just 4)
+    gt_labels <- unique' $ sliceAxis gt_boxes (-1) 4 Nothing
+    gt_boxes  <- unique' $ sliceAxis gt_boxes (-1) 0 (Just 4)
 
     let (std0, std1, std2, std3) = bbox_reg_std
     bbox_reg_mean <- named "bbox_reg_mean" $ prim __zeros (#shape := [4] .& Nil)
@@ -430,8 +430,8 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             -- select only feature that has foreground gt for each batch example
             -- positive_indices: (B, rcnn_fg_fraction * num_sample)
             bbox_feature <- forM ([0..batch_size-1] :: [_]) $ \i -> do
-                ind <- slice_axis positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
-                bat <- slice_axis bbox_feature 0 i (Just (i+1)) >>= squeeze Nothing
+                ind <- sliceAxis positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
+                bat <- sliceAxis bbox_feature 0 i (Just (i+1)) >>= squeeze Nothing
                 takeI ind bat
             bbox_feature <- concat_ 0 bbox_feature
 
@@ -569,14 +569,14 @@ graphI conf@RcnnConfigurationInference{..} =  do
                                             .& #score_index := 1
                                             .& #id_index    := 0
                                             .& #force_suppress := rcnn_force_nms .& Nil)
-                res <- slice_axis res 1 0 (Just rcnn_topk)
+                res <- sliceAxis res 1 0 (Just rcnn_topk)
                 -- final result: (num_fg_classes * rcnn_topk, 6)
                 reshape [-3, 0] res
 
             results <- stack 0 results
-            result_cls_ids <- slice_axis results (-1) 0 (Just 1)
-            result_scores  <- slice_axis results (-1) 1 (Just 2)
-            result_boxes   <- slice_axis results (-1) 2 Nothing
+            result_cls_ids <- sliceAxis results (-1) 0 (Just 1)
+            result_scores  <- sliceAxis results (-1) 1 (Just 2)
+            result_boxes   <- sliceAxis results (-1) 2 Nothing
 
             res_sym <- group [result_cls_ids, result_scores, result_boxes]
             let res_data = FasterRCNNInferenceOnly

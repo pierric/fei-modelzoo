@@ -3,6 +3,7 @@ module MXNet.NN.ModelZoo.RCNN.RCNN where
 import           RIO
 import           RIO.List                    (unzip, unzip3, unzip4, zip4)
 
+import           Fei.Einops
 import           MXNet.Base
 import qualified MXNet.Base.Operators.Tensor as T
 import           MXNet.NN.Layer
@@ -94,9 +95,9 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           topk_samples <- where_ cond neg_class topk_samples
 
           -- sample the negative class
-          index       <- slice_axis index 0 max_pos Nothing
-          mask        <- slice_axis mask  0 max_pos Nothing
-          ious_argmax <- slice_axis ious_argmax 0 max_pos Nothing
+          index       <- sliceAxis index 0 max_pos Nothing
+          mask        <- sliceAxis mask  0 max_pos Nothing
+          ious_argmax <- sliceAxis ious_argmax 0 max_pos Nothing
           -- class 2 ==> class 4
           class_4 <- onesLike mask >>= mulScalar 4
           cond    <- eqScalar 2 mask
@@ -133,7 +134,7 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           return (r, s, m)
 
       getBatch s i = squeeze (Just [0]) =<<
-                     slice_axis s 0 i (Just (i + 1))
+                     sliceAxis s 0 i (Just (i + 1))
 
 
 bboxTargetGenerator :: Int -> Int -> Int
@@ -170,23 +171,24 @@ bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
                                      .& #stds    := stds .& Nil)
     [box_targets, box_masks] <- mapM (ret `at`) ([0, 1] :: [Int])
 
-    fg_cls_targets <- expandDims 2 fg_cls_targets
+    -- fg_cls_targets <- expandDims 2 fg_cls_targets
+    fg_cls_targets <- rearrange fg_cls_targets "b (n c) -> b n c" [#c .== 1]
     class_ids_fg <- prim T.__arange (#start := 0 .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
-    class_ids_fg <- reshape [1,1,-1] class_ids_fg
+    class_ids_fg <- rearrange class_ids_fg "(b n c) -> b n c" [#b .== 1, #n .== 1]
     -- (B, N, C), one hot indicator for the best gt class id for each roi of each batch
     target_class_fg_onehot <- eqBroadcast fg_cls_targets class_ids_fg
 
-    masks_sel <- slice_axis box_masks (-1) 0 (Just 1)
+    masks_sel <- sliceAxis box_masks (-1) 0 (Just 1)
     masks_sel <- prim T._argsort (#data := masks_sel .& #axis := Just 1 .& #is_ascend := False .& Nil)
-    masks_sel <- reshape [batch_size, -1] masks_sel
+    masks_sel <- rearrange masks_sel "b n k -> b (n k)" [#k .== 1]
     -- mask indices of those positive ones (take at most max_pos items)
-    masks_sel <- slice_axis masks_sel 1 0 (Just max_pos)
+    masks_sel <- sliceAxis masks_sel 1 0 (Just max_pos)
 
     (box_targets, box_masks, clsid_ohs) <- fmap unzip3 $ forM [0..batch_size-1] $ \i -> do
-        ind      <- slice_axis masks_sel 0 i (Just (i+1)) >>= squeeze (Just [0])
-        target   <- slice_axis box_targets 0 i (Just (i+1)) >>= squeeze (Just [0])
-        mask     <- slice_axis box_masks 0 i (Just (i+1)) >>= squeeze (Just [0])
-        clsid_oh <- slice_axis target_class_fg_onehot 0 i (Just (i+1)) >>= squeeze (Just [0])
+        ind      <- sliceAxis masks_sel 0 i (Just (i+1)) >>= squeeze (Just [0])
+        target   <- sliceAxis box_targets 0 i (Just (i+1)) >>= squeeze (Just [0])
+        mask     <- sliceAxis box_masks 0 i (Just (i+1)) >>= squeeze (Just [0])
+        clsid_oh <- sliceAxis target_class_fg_onehot 0 i (Just (i+1)) >>= squeeze (Just [0])
 
         target   <- takeI ind target   >>= expandDims 0
         mask     <- takeI ind mask     >>= expandDims 0
@@ -222,7 +224,7 @@ maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cl
     --   box_weight:   (B, N, C, MS, MS), only foreground class has nonzero weight.
 
     -- gt_masks (B, M, H, W) -> (B, M, 1, H, W) -> B * (M, 1, H, W)
-    gt_masks <- reshape [0, -4, -1, 1, 0, 0] gt_masks
+    gt_masks <- rearrange gt_masks "b (m k) h w -> b m k h w" [#k .== 1]
     gt_masks <- splitBySections batch_size 0 True gt_masks
 
     -- rois (B, N, 4) -> B * (N, 4)
@@ -263,7 +265,7 @@ maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cl
             -- (N,1) (1,C) -> (N,C)
             cid_onehot <- eqBroadcast cls_targets cids
 
-            cid_onehot <- reshape [-2, 1, 1] cid_onehot
+            cid_onehot <- rearrange cid_onehot "n (c w h) -> n c w h" [#w .== 1, #h .== 1]
             -- (N, C, mask_size, mask_size)
             mask_weights <- prim T._broadcast_like
                                 (#lhs := cid_onehot
@@ -279,7 +281,7 @@ multiClassEncode gt_label samples matches = do
     -- gt_label: (B, M), value range [0, num_fg_classes), excluding background class
     -- samples:  (B, N), value -1 (negative), 0 (ignore), 1 (positive)
     -- matches:  (B, N), value range [0, M), the best-matched gt of each roi
-    labels <- reshape [0, 1, -1] gt_label
+    labels <- rearrange gt_label "b (k m) -> b k m" [#k .== 1]
     labels <- prim T._broadcast_like (#lhs := labels .& #rhs := matches .& #lhs_axes := Just [1] .& #rhs_axes := Just [1] .& Nil)
     -- labels: (B,N,M) forall batch, roi, gt. class id
     -- fg_cls_targets: (B,N) forall batch, roi, class id of the best gt
@@ -307,10 +309,10 @@ multiClassDecodeWithClsId num_classes axis threshold prediction = do
     --      cls_ids: (B, N, num_classes-1)
     --      pred_fg: (B, N, num_classes-1)
     let num_fg_classes = num_classes - 1
-    pred_fg <- slice_axis prediction axis 1 Nothing
+    pred_fg <- sliceAxis prediction axis 1 Nothing
 
     -- make a (B, N, num_fg_classes) of values [0..num_fg_classes-1]
-    zero <- zerosLike =<< slice_axis prediction axis 0 (Just 1)
+    zero <- zerosLike =<< sliceAxis prediction axis 0 (Just 1)
     cls_ids <- reshape [1, 1, num_fg_classes]
                 =<< prim T.__arange (#start := 0
                                   .& #stop := Just (fromIntegral num_fg_classes) .& Nil)
