@@ -9,7 +9,7 @@ import qualified MXNet.Base.Operators.Tensor as T
 import           MXNet.NN.Layer
 
 
-rcnnSampler :: Int -> Int -> Int -> Float -> Float -> Int
+rcnnSampler :: Int -> Int -> Int -> Double -> Double -> Int
             -> SymbolHandle -> SymbolHandle -> SymbolHandle
             -> Layer _
 rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
