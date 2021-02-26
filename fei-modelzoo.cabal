@@ -52,6 +52,6 @@ Library
                           , rio
                           , formatting
                           , attoparsec
-                          , fei-base
-                          , fei-nn
+                          , fei-base >= 1.1.0
+                          , fei-nn >= 2.0.0
                           , fei-einops
