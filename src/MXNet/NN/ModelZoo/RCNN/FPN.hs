@@ -7,7 +7,10 @@ import           MXNet.Base                  (ArgOf (..), HMap (..),
                                               SymbolHandle, at', internals,
                                               prim, (.&))
 import           MXNet.Base.Operators.Tensor (_UpSampling)
-import           MXNet.NN.Layer
+import           MXNet.Base.Tensor           (add_)
+import           MXNet.NN.Layer              (Layer, batchnorm, convolution,
+                                              named, sequential,
+                                              subscope_next_name, unique')
 
 -- TODO
 -- no_bias ?

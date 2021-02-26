@@ -57,8 +57,8 @@ graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
     unique "mask" $ do
         let take_pos t = do
                 ts <- forM ([0..batch_size-1] :: [_]) $ \i -> do
-                  ind <- slice_axis _positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
-                  bat <- slice_axis t 0 i (Just (i+1)) >>= squeeze Nothing
+                  ind <- sliceAxis _positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
+                  bat <- sliceAxis t 0 i (Just (i+1)) >>= squeeze Nothing
                   takeI ind bat
                 concat_ 0 ts
 
@@ -92,6 +92,9 @@ graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
                                                             roi_boxes
                                                             gt_matches
                                                             cls_targets
+        masks <- named "mask" $ identity masks
+        mask_targets <- named "mask-t" $ identity mask_targets
+        mask_weights <- named "mask-w" $ identity mask_weights
         unique "loss" $ do
             masks_loss  <- sigmoidBCE masks mask_targets (Just mask_weights) AggSum
             masks_loss  <- sum_ masks_loss Nothing False

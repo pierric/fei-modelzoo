@@ -19,74 +19,76 @@ import           MXNet.NN.ModelZoo.RCNN.RCNN
 import qualified MXNet.NN.ModelZoo.Resnet    as Resnet
 import qualified MXNet.NN.ModelZoo.VGG       as VGG
 
-data Backbone = VGG16
-    | RESNET50
-    | RESNET101
-    | RESNET50FPN
-    deriving (Show, Read, Eq)
+data Backbone = VGG16 | RESNET50 | RESNET101 | RESNET50FPN deriving
+    ( Eq
+    , Read
+    , Show
+    )
 
-data RcnnConfiguration = RcnnConfigurationTrain
-    { backbone             :: Backbone
-    , batch_size           :: Int
-    , feature_strides      :: [Int]
-    , pretrained_weights   :: String
-    , bbox_reg_std         :: (Float, Float, Float, Float)
-    , rpn_anchor_scales    :: [Int]
-    , rpn_anchor_ratios    :: [Float]
-    , rpn_anchor_base_size :: Int
-    , rpn_pre_topk         :: Int
-    , rpn_post_topk        :: Int
-    , rpn_nms_thresh       :: Float
-    , rpn_min_size         :: Int
-    , rpn_batch_rois       :: Int
-    , rpn_fg_fraction      :: Float
-    , rpn_fg_overlap       :: Float
-    , rpn_bg_overlap       :: Float
-    , rpn_allowd_border    :: Int
-    , rcnn_num_classes     :: Int
-    , rcnn_pooled_size     :: Int
-    , rcnn_batch_rois      :: Int
-    , rcnn_fg_fraction     :: Float
-    , rcnn_fg_overlap      :: Float
-    , rcnn_max_num_gt      :: Int
-    }
-    | RcnnConfigurationInference
-    { backbone             :: Backbone
-    , batch_size           :: Int
-    , feature_strides      :: [Int]
-    , checkpoint           :: String
-    , bbox_reg_std         :: (Float, Float, Float, Float)
-    , rpn_anchor_scales    :: [Int]
-    , rpn_anchor_ratios    :: [Float]
-    , rpn_anchor_base_size :: Int
-    , rpn_pre_topk         :: Int
-    , rpn_post_topk        :: Int
-    , rpn_nms_thresh       :: Float
-    , rpn_min_size         :: Int
-    , rcnn_num_classes     :: Int
-    , rcnn_pooled_size     :: Int
-    , rcnn_batch_rois      :: Int
-    , rcnn_force_nms       :: Bool
-    , rcnn_nms_thresh      :: Float
-    , rcnn_topk            :: Int
-    }
-    deriving Show
+data RcnnConfiguration
+  = RcnnConfigurationTrain
+      { backbone             :: Backbone
+      , batch_size           :: Int
+      , feature_strides      :: [Int]
+      , pretrained_weights   :: String
+      , bbox_reg_std         :: (Float, Float, Float, Float)
+      , rpn_anchor_scales    :: [Int]
+      , rpn_anchor_ratios    :: [Float]
+      , rpn_anchor_base_size :: Int
+      , rpn_pre_topk         :: Int
+      , rpn_post_topk        :: Int
+      , rpn_nms_thresh       :: Float
+      , rpn_min_size         :: Int
+      , rpn_batch_rois       :: Int
+      , rpn_fg_fraction      :: Float
+      , rpn_fg_overlap       :: Float
+      , rpn_bg_overlap       :: Float
+      , rpn_allowd_border    :: Int
+      , rcnn_num_classes     :: Int
+      , rcnn_pooled_size     :: Int
+      , rcnn_batch_rois      :: Int
+      , rcnn_fg_fraction     :: Double
+      , rcnn_fg_overlap      :: Double
+      , rcnn_max_num_gt      :: Int
+      }
+  | RcnnConfigurationInference
+      { backbone             :: Backbone
+      , batch_size           :: Int
+      , feature_strides      :: [Int]
+      , checkpoint           :: String
+      , bbox_reg_std         :: (Float, Float, Float, Float)
+      , rpn_anchor_scales    :: [Int]
+      , rpn_anchor_ratios    :: [Float]
+      , rpn_anchor_base_size :: Int
+      , rpn_pre_topk         :: Int
+      , rpn_post_topk        :: Int
+      , rpn_nms_thresh       :: Float
+      , rpn_min_size         :: Int
+      , rcnn_num_classes     :: Int
+      , rcnn_pooled_size     :: Int
+      , rcnn_batch_rois      :: Int
+      , rcnn_force_nms       :: Bool
+      , rcnn_nms_thresh      :: Float
+      , rcnn_topk            :: Int
+      }
+  deriving (Show)
 
-data FasterRCNN = FasterRCNN
-    { _rpn_loss         :: (SymbolHandle, SymbolHandle, SymbolHandle)
-    , _box_loss         :: (SymbolHandle, SymbolHandle)
-    , _cls_targets      :: SymbolHandle
-    , _roi_boxes        :: SymbolHandle
-    , _gt_matches       :: SymbolHandle
-    , _positive_indices :: SymbolHandle
-    , _top_feature      :: SymbolHandle
-    }
-    | FasterRCNNInferenceOnly
-    { _top_feature :: SymbolHandle
-    , _cls_ids     :: SymbolHandle
-    , _scores      :: SymbolHandle
-    , _boxes       :: SymbolHandle
-    }
+data FasterRCNN
+  = FasterRCNN
+      { _rpn_loss         :: (SymbolHandle, SymbolHandle, SymbolHandle)
+      , _box_loss         :: (SymbolHandle, SymbolHandle)
+      , _cls_targets      :: SymbolHandle
+      , _roi_boxes        :: SymbolHandle
+      , _gt_matches       :: SymbolHandle
+      , _positive_indices :: SymbolHandle
+      , _top_feature      :: SymbolHandle
+      }
+  | FasterRCNNInferenceOnly
+      { _top_feature :: SymbolHandle
+      , _cls_ids     :: SymbolHandle
+      , _scores      :: SymbolHandle
+      , _boxes       :: SymbolHandle
+      }
 
 stageList :: Backbone -> [Int]
 stageList RESNET50FPN = [2..5]
@@ -234,11 +236,11 @@ rpn conf convFeats imInfo = unique "rpn" $ do
                                         .& #score_index := 0
                                         .& #id_index    := (-1)
                                         .& #force_suppress := True .& Nil)
-            tmp <- slice_axis tmp 1 0 (Just $ rpn_post_topk conf)
+            tmp <- sliceAxis tmp 1 0 (Just $ rpn_post_topk conf)
             rpn_roi_scores <- blockGrad =<<
-                              slice_axis tmp (-1) 0 (Just 1)
+                              sliceAxis tmp (-1) 0 (Just 1)
             rpn_roi_boxes  <- blockGrad =<<
-                              slice_axis tmp (-1) 1 Nothing
+                              sliceAxis tmp (-1) 1 Nothing
             return (rpn_roi_scores, rpn_roi_boxes)
 
         bbox_clip_to_image rois info = do
@@ -311,8 +313,8 @@ graphT conf@RcnnConfigurationTrain{..} =  do
     rpn_box_targets <- variable "rpn_box_targets"
     rpn_box_masks   <- variable "rpn_box_masks"
 
-    gt_labels <- unique' $ slice_axis gt_boxes (-1) 4 Nothing
-    gt_boxes  <- unique' $ slice_axis gt_boxes (-1) 0 (Just 4)
+    gt_labels <- unique' $ sliceAxis gt_boxes (-1) 4 Nothing
+    gt_boxes  <- unique' $ sliceAxis gt_boxes (-1) 0 (Just 4)
 
     let (std0, std1, std2, std3) = bbox_reg_std
     bbox_reg_mean <- named "bbox_reg_mean" $ prim __zeros (#shape := [4] .& Nil)
@@ -430,8 +432,8 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             -- select only feature that has foreground gt for each batch example
             -- positive_indices: (B, rcnn_fg_fraction * num_sample)
             bbox_feature <- forM ([0..batch_size-1] :: [_]) $ \i -> do
-                ind <- slice_axis positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
-                bat <- slice_axis bbox_feature 0 i (Just (i+1)) >>= squeeze Nothing
+                ind <- sliceAxis positive_indices 0 i (Just (i+1)) >>= squeeze Nothing
+                bat <- sliceAxis bbox_feature 0 i (Just (i+1)) >>= squeeze Nothing
                 takeI ind bat
             bbox_feature <- concat_ 0 bbox_feature
 
@@ -569,14 +571,14 @@ graphI conf@RcnnConfigurationInference{..} =  do
                                             .& #score_index := 1
                                             .& #id_index    := 0
                                             .& #force_suppress := rcnn_force_nms .& Nil)
-                res <- slice_axis res 1 0 (Just rcnn_topk)
+                res <- sliceAxis res 1 0 (Just rcnn_topk)
                 -- final result: (num_fg_classes * rcnn_topk, 6)
                 reshape [-3, 0] res
 
             results <- stack 0 results
-            result_cls_ids <- slice_axis results (-1) 0 (Just 1)
-            result_scores  <- slice_axis results (-1) 1 (Just 2)
-            result_boxes   <- slice_axis results (-1) 2 Nothing
+            result_cls_ids <- sliceAxis results (-1) 0 (Just 1)
+            result_scores  <- sliceAxis results (-1) 1 (Just 2)
+            result_boxes   <- sliceAxis results (-1) 2 Nothing
 
             res_sym <- group [result_cls_ids, result_scores, result_boxes]
             let res_data = FasterRCNNInferenceOnly
