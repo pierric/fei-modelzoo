@@ -40,9 +40,9 @@ data RcnnConfiguration
       , rpn_nms_thresh       :: Float
       , rpn_min_size         :: Int
       , rpn_batch_rois       :: Int
-      , rpn_fg_fraction      :: Float
-      , rpn_fg_overlap       :: Float
-      , rpn_bg_overlap       :: Float
+      , rpn_fg_fraction      :: Double
+      , rpn_fg_overlap       :: Double
+      , rpn_bg_overlap       :: Double
       , rpn_allowd_border    :: Int
       , rcnn_num_classes     :: Int
       , rcnn_pooled_size     :: Int
