@@ -21,7 +21,7 @@ import           RIO
 -- # loss
 -- lenet = mx.symbol.SoftmaxOutput(data=fc2, name='softmax')
 
-symbol :: Layer SymbolHandle
+symbol :: DType a => Layer (Symbol a)
 symbol = do
     x  <- variable "x"
     y  <- variable "y"
@@ -40,6 +40,6 @@ symbol = do
         v3 <- fullyConnected (#data := fl .& #num_hidden := 500 .& Nil)
         a3 <- activation     (#data := v3 .& #act_type := #tanh .& Nil)
 
-        fullyConnected    (#data := a3 .& #num_hidden := 10  .& Nil)
+        fullyConnected (#data := a3 .& #num_hidden := 10  .& Nil)
 
     named "output" $ softmaxoutput (#data := logit .& #label := y .& Nil)

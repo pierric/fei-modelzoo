@@ -16,7 +16,7 @@ import           MXNet.NN.Layer
 
 rootName = "resnext0"
 
-symbol :: SymbolHandle -> Layer SymbolHandle
+symbol :: DType a => (Symbol a) -> Layer (Symbol a)
 symbol dat = unique rootName $ do
     bnx <- named "batchnorm0" $
            batchnorm (#data := dat
@@ -60,7 +60,7 @@ symbol dat = unique rootName $ do
     resargs = #bottle_neck := True .& #workspace := conv_workspace .& #memonger := False .& Nil
 
 type instance ParameterList "_residual_layer(resnext)" t =
-  '[ '("data"       , 'AttrReq SymbolHandle)
+  '[ '("data"       , 'AttrReq t)
    , '("num_filter" , 'AttrReq Int)
    , '("stride"     , 'AttrReq [Int])
    , '("dim_match"  , 'AttrReq Bool)
@@ -69,8 +69,9 @@ type instance ParameterList "_residual_layer(resnext)" t =
    , '("bn_mom"     , 'AttrOpt Float)
    , '("workspace"  , 'AttrOpt Int)
    , '("memonger"   , 'AttrOpt Bool) ]
-residual :: (Fullfilled "_residual_layer(resnext)" () args)
-         => Int -> ArgsHMap "_residual_layer(resnext)" () args -> Layer SymbolHandle
+residual :: (Fullfilled "_residual_layer(resnext)" (Symbol a) args, DType a)
+         => Int -> ArgsHMap "_residual_layer(resnext)" (Symbol a) args
+         -> Layer (Symbol a)
 residual _id args = do
     let dat        = args ! #data
         num_filter = args ! #num_filter
@@ -145,7 +146,7 @@ residual _id args = do
                             .& #momentum    := bn_mom
                             .& #fix_gamma   := False .& Nil)
         when memonger $
-          liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
+          void $ setAttr shortcut "mirror_stage" "true"
         eltwise <- add_ bn3 shortcut
         activation (#data := eltwise .& #act_type := #relu .& Nil)
     else do
@@ -194,6 +195,6 @@ residual _id args = do
                             .& #momentum    := bn_mom
                             .& #fix_gamma   := False .& Nil)
         when memonger $
-          liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
+          void $ setAttr shortcut "mirror_stage" "true"
         eltwise <- add_ bn2 shortcut
         activation (#data := eltwise .& #act_type := #relu .& Nil)
