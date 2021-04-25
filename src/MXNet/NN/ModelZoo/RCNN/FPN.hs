@@ -3,9 +3,9 @@ module MXNet.NN.ModelZoo.RCNN.FPN where
 import           RIO
 import qualified RIO.NonEmpty                as NE (reverse, unzip, zip, (<|))
 
-import           MXNet.Base                  (ArgOf (..), HMap (..),
-                                              SymbolHandle, at', internals,
-                                              prim, (.&))
+import           MXNet.Base                  (ArgOf (..), DType, HMap (..),
+                                              Symbol, at', internals, prim,
+                                              (.&))
 import           MXNet.Base.Operators.Tensor (_UpSampling)
 import           MXNet.Base.Tensor           (add_)
 import           MXNet.NN.Layer              (Layer, batchnorm, convolution,
@@ -16,7 +16,9 @@ import           MXNet.NN.Layer              (Layer, batchnorm, convolution,
 -- no_bias ?
 -- batchnorm args ?
 
-fpnFeatureExpander :: SymbolHandle -> NonEmpty (Text, Int) -> Layer (NonEmpty SymbolHandle)
+fpnFeatureExpander :: DType a
+                   => Symbol a
+                   -> NonEmpty (Text, Int) -> Layer (NonEmpty (Symbol a))
 fpnFeatureExpander sym output_layers = do
     sym <- internals sym
     layers <- mapM (at' sym) layer_names
@@ -38,7 +40,7 @@ fpnFeatureExpander sym output_layers = do
                        .& #stride := [1,1]
                        .& #no_bias := True .& Nil)
         y <- named "bn0" $
-             batchnorm   (#data := y .& Nil)
+             batchnorm (#data := y .& Nil)
         out <- named "conv2" $
                convolution (#data := y
                          .& #num_filter := nflt
@@ -47,7 +49,7 @@ fpnFeatureExpander sym output_layers = do
                          .& #stride := [1,1]
                          .& #no_bias := True .& Nil)
         out <- named "bn1" $
-               batchnorm   (#data := out .& Nil)
+               batchnorm (#data := out .& Nil)
         writeIORef outputs [out]
         return (Just y)
     topDownPass outputs (Just prev) (nflt, layer) = subscope_next_name $ unique' $ do
@@ -59,7 +61,7 @@ fpnFeatureExpander sym output_layers = do
                        .& #stride := [1,1]
                        .& #no_bias := True .& Nil)
         y <- named "bn0" $
-             batchnorm   (#data := y .& Nil)
+             batchnorm (#data := y .& Nil)
         prev_up <- prim _UpSampling
                          (#data := [prev]
                        .& #num_args := 1
@@ -74,6 +76,6 @@ fpnFeatureExpander sym output_layers = do
                          .& #stride := [1,1]
                          .& #no_bias := True .& Nil)
         out <- named "bn1" $
-               batchnorm   (#data := out .& Nil)
+               batchnorm (#data := out .& Nil)
         modifyIORef outputs (out NE.<|)
         return (Just y)

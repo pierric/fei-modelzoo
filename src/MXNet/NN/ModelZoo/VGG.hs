@@ -53,7 +53,7 @@ VGG(
  -}
 
 
-getFeature :: SymbolHandle -> [Int] -> [Int] -> Bool -> Bool -> Layer SymbolHandle
+getFeature :: DType a => Symbol a -> [Int] -> [Int] -> Bool -> Bool -> Layer (Symbol a)
 getFeature dat layers filters with_batch_norm with_last_pooling = do
     sym <- foldM build1 dat specs
     -- inlining the build1 below, and omit pooling depending on the with_last_pooling
@@ -90,7 +90,7 @@ getFeature dat layers filters with_batch_norm with_last_pooling = do
                   else return sym
         activation (#data := sym .& #act_type := #relu .& Nil)
 
-getTopFeature :: SymbolHandle -> Layer SymbolHandle
+getTopFeature :: DType a => Symbol a -> Layer (Symbol a)
 getTopFeature input = do
     sym <- unique' $ flatten input
     sym <- fullyConnected (#data := sym .& #num_hidden := 4096 .& Nil)
@@ -100,7 +100,7 @@ getTopFeature input = do
     -- sym <- activation (#data := sym .& #act_type := #relu .& Nil)
     dropout sym 0.5
 
-symbol :: SymbolHandle -> Int -> Bool -> Layer SymbolHandle
+symbol :: DType a => Symbol a -> Int -> Bool -> Layer (Symbol a)
 symbol dat num_layers with_batch_norm =
     getFeature dat layers filters with_batch_norm True >>= getTopFeature
   where

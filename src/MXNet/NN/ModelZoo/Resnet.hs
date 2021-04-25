@@ -15,12 +15,14 @@ instance Exception NoKnownExperiment
 -------------------------------------------------------------------------------
 -- ResNet
 
+resnet50Args :: ArgsHMap "resnet" (Symbol a) _
 resnet50Args = (#num_stages := 4
              .& #filter_list := [64, 256, 512, 1024, 2048]
              .& #units := [3,4,6,3]
              .& #bottle_neck := True
              .& #workspace := 256 .& Nil)
 
+resnet50 :: DType a => Int -> Symbol a -> Layer (Symbol a)
 resnet50 num_classes x = do
     flt <- sequential "features" $ do
         u0 <- getFeature x resnet50Args
@@ -28,6 +30,7 @@ resnet50 num_classes x = do
         flatten u1
     named "output"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
+resnet101Args :: ArgsHMap "resnet" (Symbol a) _
 resnet101Args = (#num_stages := 4
              .& #filter_list := [64, 256, 512, 1024, 2048]
              .& #units := [3,4,23,3]
@@ -35,14 +38,15 @@ resnet101Args = (#num_stages := 4
              .& #workspace := 256
              .& Nil)
 
-resset101 num_classes x = do
+resnet101 :: DType a => Int -> Symbol a -> Layer (Symbol a)
+resnet101 num_classes x = do
     flt <- sequential "features" $ do
         u0 <- getFeature x resnet101Args
         u1 <- getTopFeature u0 resnet101Args
         flatten u1
     named "dense0"  $ fullyConnected (#data := flt .& #num_hidden := num_classes .& Nil)
 
-symbol :: Int -> Int -> Int -> Layer SymbolHandle
+symbol :: DType a => Int -> Int -> Int -> Layer (Symbol a)
 symbol num_classes num_layers image_size = do
     let args = if image_size <= 28 then args_small_image else args_large_image
 
@@ -124,10 +128,10 @@ type instance ParameterList "resnet" t =
    , '("bottle_neck", 'AttrReq Bool)
    , '("workspace"  , 'AttrReq Int)]
 
-getFeature :: (Fullfilled "resnet" () args)
-           => SymbolHandle
-           -> ArgsHMap "resnet" () args
-           -> Layer SymbolHandle
+getFeature :: (Fullfilled "resnet" (Symbol a) args, DType a)
+           => (Symbol a)
+           -> ArgsHMap "resnet" (Symbol a) args
+           -> Layer (Symbol a)
 getFeature inp args = do
     bnx <- batchnorm   (#data := inp
                      .& #eps := eps
@@ -165,8 +169,8 @@ getFeature inp args = do
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
-getTopFeature :: (Fullfilled "resnet" () args)
-              => SymbolHandle -> ArgsHMap "resnet" () args -> Layer SymbolHandle
+getTopFeature :: (Fullfilled "resnet" (Symbol a) args, DType a)
+              => Symbol a -> ArgsHMap "resnet" (Symbol a) args -> Layer (Symbol a)
 getTopFeature inp args = do
     bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
     bn1 <- batchnorm   (#data := bdy -- 9
@@ -186,7 +190,8 @@ getTopFeature inp args = do
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
-buildLayer :: Bool -> Int -> SymbolHandle -> (Int, Int, Int) -> Layer SymbolHandle
+buildLayer :: DType a
+           => Bool -> Int -> (Symbol a) -> (Int, Int, Int) -> Layer (Symbol a)
 buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) =
     -- unique (sformat ("stage" % int) (stage_id + 1)) $ do
     subscope_next_name $ sequential' $ do
@@ -213,7 +218,7 @@ buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) =
     resargs = #bottle_neck := bottle_neck .& #workspace := workspace .& #memonger := False .& Nil
 
 type instance ParameterList "_residual_layer(resnet)" t =
-  '[ '("data"       , 'AttrReq SymbolHandle)
+  '[ '("data"       , 'AttrReq t)
    , '("num_filter" , 'AttrReq Int)
    , '("stride"     , 'AttrReq [Int])
    , '("dim_match"  , 'AttrReq Bool)
@@ -221,10 +226,10 @@ type instance ParameterList "_residual_layer(resnet)" t =
    , '("bn_mom"     , 'AttrOpt Float)
    , '("workspace"  , 'AttrOpt Int)
    , '("memonger"   , 'AttrOpt Bool) ]
-residual :: (Fullfilled "_residual_layer(resnet)" () args)
+residual :: (Fullfilled "_residual_layer(resnet)" (Symbol a) args, DType a)
          => (Int, Int)
-         -> ArgsHMap "_residual_layer(resnet)" () args
-         -> Layer SymbolHandle
+         -> ArgsHMap "_residual_layer(resnet)" (Symbol a) args
+         -> Layer (Symbol a)
 residual (conv_id, bn_id) args = subscope_next_name $ do
     let dat        = args ! #data
         num_filter = args ! #num_filter
@@ -304,7 +309,7 @@ residual (conv_id, bn_id) args = subscope_next_name $ do
                            .& #workspace  := workspace
                            .& #no_bias    := True .& Nil)
         when memonger $
-          liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
+          void $ setAttr shortcut "mirror_stage" "true"
 
         named "plus" $ add_ conv3 shortcut
 
@@ -358,7 +363,7 @@ residual (conv_id, bn_id) args = subscope_next_name $ do
                            .& #workspace := workspace
                            .& #no_bias   := True .& Nil)
         when memonger $
-          liftIO $ void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
+          void $ setAttr shortcut "mirror_stage" "true"
 
         named "plus" $ add_ conv2 shortcut
 
