@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLists     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 module MXNet.NN.ModelZoo.RCNN.FasterRCNN where
