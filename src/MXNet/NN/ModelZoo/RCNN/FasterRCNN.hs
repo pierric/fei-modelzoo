@@ -116,7 +116,7 @@ features2 RESNET50    dat = Resnet.getTopFeature dat Resnet.resnet50Args
 features2 RESNET101   dat = Resnet.getTopFeature dat Resnet.resnet101Args
 features2 RESNET50FPN dat = return dat
 
-rpn :: forall a . NumericDType a
+rpn :: forall a . FloatDType a
     => RcnnConfiguration
     -> NonEmpty (Symbol a) -> Symbol a
     -> Layer (Symbol a, Symbol a, Symbol a, Symbol a)
@@ -211,10 +211,10 @@ rpn conf convFeats imInfo = unique "rpn" $ do
             invalid <- ltScalar min_size width  >>= \c1 ->
                        ltScalar min_size height >>= \c2 ->
                             or_ c1 c2
-            mask    <- castToNum @(DTypeName a) invalid >>= onesLike >>= mulScalar (-1)
+            mask    <- castToFloat @(DTypeName a) invalid >>= onesLike >>= mulScalar (-1)
             scores  <- where_ invalid mask scores
             invalid <- broadcastAxis [2] [4] invalid
-            mask    <- castToNum @(DTypeName a) invalid >>= onesLike >>= mulScalar (-1)
+            mask    <- castToFloat @(DTypeName a) invalid >>= onesLike >>= mulScalar (-1)
             rois    <- concat_ (-1) [xmin, ymin, xmax, ymax]
             rois    <- where_ invalid mask rois
             blockGrad =<< named "proposals" (concat_ (-1) [scores, rois])
@@ -294,7 +294,7 @@ alignROIs features rois stage_indices roi_pooled_size strides = do
     prim _add_n (#args := features .& Nil)
 
 
-graphT :: forall a. NumericDType a
+graphT :: forall a . FloatDType a
        => RcnnConfiguration -> Layer (FasterRCNN a, Symbol a)
 graphT conf@RcnnConfigurationTrain{..} =  do
     -- dat: (B, image_height, image_width)
@@ -311,9 +311,9 @@ graphT conf@RcnnConfigurationTrain{..} =  do
     gt_boxes  <- unique' $ sliceAxis gt_boxes (-1) 0 (Just 4)
 
     let (std0, std1, std2, std3) = bbox_reg_std
-    bbox_reg_mean <- case enumWeaken @NumericDTypes @AllDTypes @(DTypeName a) of
-                       Sub Dict -> named "bbox_reg_mean" $ zeros Proxy [4]
-    bbox_reg_std  <- named "bbox_reg_std"  $ constant [4] [std0, std1, std2, std3]
+        fromFloat = fromRational . toRational
+    bbox_reg_mean <- named "bbox_reg_mean" $ zerosF Proxy [4]
+    bbox_reg_std  <- named "bbox_reg_std"  $ constant [4] $ map fromFloat [std0, std1, std2, std3]
 
     sequential "features" $ do
         feats <- features1 backbone dat
@@ -335,7 +335,7 @@ graphT conf@RcnnConfigurationTrain{..} =  do
                                                     rois_scores
                                                     gt_boxes
 
-            roi_batchid <- arange Proxy 0 (Just $ fromIntegral batch_size) Nothing
+            roi_batchid <- arangeF Proxy 0 (Just $ fromIntegral batch_size) Nothing
             roi_batchid <- repeat_ rcnn_batch_rois Nothing roi_batchid
             roi_batchid <- reshape [-1, 1] roi_batchid
             -- rois: (B * rcnn_batch_rois, 4)
@@ -363,7 +363,7 @@ graphT conf@RcnnConfigurationTrain{..} =  do
                        bbox_reg_std
 
             -- average number of targets per batch example
-            cls_mask <- geqScalar 0 rpn_cls_targets >>= castToNum @(DTypeName a)
+            cls_mask <- geqScalar 0 rpn_cls_targets >>= castToFloat @(DTypeName a)
             num_pos_avg  <- sum_ cls_mask Nothing False >>= divScalar (fromIntegral batch_size) >>= addScalar 1e-14
 
             rpn_cls_prob <- sigmoid rpn_raw_scores
@@ -371,7 +371,7 @@ graphT conf@RcnnConfigurationTrain{..} =  do
                 -- sigmoid + binary-cross-entropy
                 -- rpn_raw_scores: (B, num_rois, 1)
                 -- rpn_cls_targets: (B, num_rois, 1)
-                sample_mask  <- geqScalar 0 rpn_cls_targets >>= castToNum @(DTypeName a)
+                sample_mask  <- geqScalar 0 rpn_cls_targets >>= castToFloat @(DTypeName a)
                 rpn_cls_loss <- sigmoidBCE rpn_raw_scores rpn_cls_targets (Just sample_mask) AggSum
 
                 -- rpn_cls_loss: (1,)
@@ -433,7 +433,7 @@ graphT conf@RcnnConfigurationTrain{..} =  do
 
             -- for each foreground ROI, predict boxes (reg) for each foreground class
             avg_valid_pred <- gtScalar (-1) cls_targets
-                                >>= castToNum @(DTypeName a)
+                                >>= castToFloat @(DTypeName a)
                                 >>= \s -> sum_ s Nothing False
                                 >>= divScalar (fromIntegral batch_size)
                                 >>= addScalar 1e-14
@@ -466,7 +466,7 @@ graphT conf@RcnnConfigurationTrain{..} =  do
             }, result_sym)
 
 
-graphI :: NumericDType a
+graphI :: FloatDType a
        => RcnnConfiguration -> Layer (FasterRCNN a, Symbol a)
 graphI conf@RcnnConfigurationInference{..} =  do
     -- dat: (B, image_height, image_width)
@@ -480,7 +480,7 @@ graphI conf@RcnnConfigurationInference{..} =  do
         -- roi_boxes: (B, rpn_post_topk, 4), rpn predicted boxes (x0,y0,x1,y1)
         (roi_scores, roi_boxes, _, _) <- rpn conf feats imInfo
 
-        roi_batchid <- arange Proxy 0 (Just $ fromIntegral batch_size) Nothing
+        roi_batchid <- arangeF Proxy 0 (Just $ fromIntegral batch_size) Nothing
         roi_batchid <- repeat_  rpn_post_topk Nothing roi_batchid
         roi_batchid <- reshape [-1, 1] roi_batchid
         -- rois: (B * rpn_post_topk, 4)
