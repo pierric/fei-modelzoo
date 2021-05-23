@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLists #-}
 module MXNet.NN.ModelZoo.RCNN.FPN where
 
 import           RIO

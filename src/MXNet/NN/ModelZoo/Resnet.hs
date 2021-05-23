@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLists #-}
 module MXNet.NN.ModelZoo.Resnet where
 
 import           Data.Typeable  (Typeable)
@@ -8,8 +9,9 @@ import qualified RIO.NonEmpty   as RNE
 import           MXNet.Base
 import           MXNet.NN.Layer
 
-data NoKnownExperiment = NoKnownExperiment Int
-    deriving (Typeable, Show)
+data NoKnownExperiment
+  = NoKnownExperiment Int
+  deriving (Show, Typeable)
 instance Exception NoKnownExperiment
 
 -------------------------------------------------------------------------------

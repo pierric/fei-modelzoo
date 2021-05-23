@@ -11,7 +11,7 @@ import qualified MXNet.Base.Operators.Tensor as T
 import           MXNet.NN.Layer
 
 
-rcnnSampler :: forall a . NumericDType a
+rcnnSampler :: forall a . FloatDType a
             => Int -> Int -> Int -> Double -> Double -> Int
             -> Symbol a -> Symbol a -> Symbol a
             -> Layer (Symbol a, Symbol a, Symbol a)
@@ -55,7 +55,7 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
           -- iou of the best gt box of each roi
           ious_max <- prim T._max (#data := ious .& #axis := Just [-1] .& Nil)
           -- index of the best gt box of each roi
-          ious_argmax <- argmax ious (Just (-1)) False >>= castToNum @(DTypeName a)
+          ious_argmax <- argmax ious (Just (-1)) False >>= castToFloat @(DTypeName a)
 
           class_0 <- zerosLike ious_max
           class_2 <- onesLike  ious_max >>= mulScalar 2
@@ -140,7 +140,7 @@ rcnnSampler batch_size num_proposal num_sample fg_overlap fg_fraction max_num_gt
                      sliceAxis s 0 i (Just (i + 1))
 
 
-bboxTargetGenerator :: forall a . NumericDType a
+bboxTargetGenerator :: forall a . FloatDType a
                     => Int -> Int -> Int
                     -> Symbol a
                     -> Symbol a
@@ -178,10 +178,10 @@ bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
     target_class_fg_onehot <- sequential "FG_1hot" $ do
         -- fg_cls_targets <- expandDims 2 fg_cls_targets
         fg_cls_targets <- rearrange fg_cls_targets "b (n c) -> b n c" [#c .== 1]
-        class_ids_fg <- arange Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
+        class_ids_fg <- arangeF Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
         class_ids_fg <- rearrange class_ids_fg "(b n c) -> b n c" [#b .== 1, #n .== 1]
         -- (B, N, C), one hot indicator for the best gt class id for each roi of each batch
-        eq_ fg_cls_targets class_ids_fg >>= castToNum @(DTypeName a)
+        eq_ fg_cls_targets class_ids_fg >>= castToFloat @(DTypeName a)
 
     masks_sel <- sequential "MaskSel" $ do
         masks_sel <- sliceAxis box_masks (-1) 0 (Just 1)
@@ -215,7 +215,7 @@ bboxTargetGenerator batch_size num_fg_classes max_pos samples matches anchors gt
         return (cls_targets, box_targets, box_masks, masks_sel)
 
 
-maskTargetGenerator :: forall a . NumericDType a
+maskTargetGenerator :: forall a . FloatDType a
                     => Int -> Int -> Int
                     -> Symbol a
                     -> Symbol a
@@ -246,7 +246,7 @@ maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cl
     -- (B, N) -> B * (N,)
     cls_targets <- splitBySections batch_size 0 True cls_targets
 
-    class_ids_fg <- arange Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
+    class_ids_fg <- arangeF Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
     -- (C,) -> (1, C)
     class_ids_fg <- reshape [1, -1] class_ids_fg
 
@@ -272,7 +272,7 @@ maskTargetGenerator batch_size num_fg_classes mask_size gt_masks rois matches cl
             -- (N,) -> (N,1)
             cls_targets <- expandDims 1 cls_targets
             -- (N,1) (1,C) -> (N,C)
-            cid_onehot <- eq_ cls_targets cids >>= castToNum @(DTypeName a)
+            cid_onehot <- eq_ cls_targets cids >>= castToFloat @(DTypeName a)
 
             cid_onehot <- rearrange cid_onehot "n (c w h) -> n c w h" [#w .== 1, #h .== 1]
             -- (N, C, mask_size, mask_size)
@@ -309,7 +309,7 @@ multiClassEncode gt_label samples matches = sequential "MultiClassEncoder" $ do
     return (fg_cls_targets, cls_targets)
 
 
-multiClassDecodeWithClsId :: (DType a, InEnum (DTypeName a) NumericDTypes)
+multiClassDecodeWithClsId :: FloatDType a
                           => Int -> Int -> Double -> Symbol a
                           -> Layer (Symbol a, Symbol a)
 multiClassDecodeWithClsId num_classes axis threshold prediction = do
@@ -326,7 +326,7 @@ multiClassDecodeWithClsId num_classes axis threshold prediction = do
     -- make a (B, N, num_fg_classes) of values [0..num_fg_classes-1]
     zero <- zerosLike =<< sliceAxis prediction axis 0 (Just 1)
     cls_ids <- reshape [1, 1, num_fg_classes]
-                =<< arange Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
+                =<< arangeF Proxy 0 (Just $ fromIntegral num_fg_classes) Nothing
     cls_ids <- add_ zero cls_ids
 
     mask <- gtScalar threshold pred_fg

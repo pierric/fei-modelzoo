@@ -20,7 +20,7 @@ data MaskRCNN a
       , _masks              :: Symbol a
       }
 
-maskHead :: NumericDType a => Symbol a -> Int -> Int -> Int -> Int -> Layer (Symbol a)
+maskHead :: FloatDType a => Symbol a -> Int -> Int -> Int -> Int -> Layer (Symbol a)
 maskHead top_feat num_fcn_conv num_fg_classes batch_size num_mask_channels = do
     -- top_feat: The network input tensor of shape (B * N, fC, fH, fW).
     --
@@ -52,7 +52,7 @@ maskHead top_feat num_fcn_conv num_fg_classes batch_size num_mask_channels = do
             unique' $ activation (#data := x .& #act_type := #relu .& Nil)
 
 
-graphT :: NumericDType a
+graphT :: FloatDType a
        => FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN a, Symbol a)
 graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
     gt_masks <- variable "gt_masks"
@@ -117,7 +117,7 @@ graphT conf@(FasterRCNN.RcnnConfigurationTrain{..}) = do
                 _masks_loss = masks_loss
             }, result_sym)
 
-graphI :: NumericDType a
+graphI :: FloatDType a
        => FasterRCNN.RcnnConfiguration -> Layer (MaskRCNN a, Symbol a)
 graphI conf@(FasterRCNN.RcnnConfigurationInference{..}) = do
     (fr@FasterRCNN.FasterRCNNInferenceOnly{..}, fr_outputs) <- FasterRCNN.graphI conf

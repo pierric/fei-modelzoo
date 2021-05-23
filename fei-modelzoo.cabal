@@ -1,6 +1,6 @@
 cabal-version:              2.4
 name:                       fei-modelzoo
-version:                    1.1.0
+version:                    2.0.0
 synopsis:                   A collection of standard models
 description:                A collection of standard models
 homepage:                   http://github.com/pierric/fei-modelzoo
@@ -17,6 +17,7 @@ Library
                             MXNet.NN.ModelZoo.VGG
                             MXNet.NN.ModelZoo.Resnet
                             MXNet.NN.ModelZoo.Resnext
+                            MXNet.NN.ModelZoo.LambdaLayer
                             MXNet.NN.ModelZoo.RCNN.FPN
                             MXNet.NN.ModelZoo.RCNN.RCNN
                             MXNet.NN.ModelZoo.RCNN.MaskRCNN
@@ -28,7 +29,6 @@ Library
                             TypeFamilies,
                             OverloadedLabels,
                             OverloadedStrings,
-                            OverloadedLists,
                             FlexibleContexts,
                             FlexibleInstances,
                             StandaloneDeriving,
@@ -56,3 +56,18 @@ Library
                           , fei-base >= 2.0.0
                           , fei-nn >= 2.0.0
                           , fei-einops >= 0.1.0
+
+test-suite model-test
+  type:                     exitcode-stdio-1.0
+  hs-source-dirs:           test
+  main-is:                  TestMain.hs
+  other-modules:            TestLambdaLayer
+  build-depends:            rio
+                          , base
+                          , tasty
+                          , tasty-hunit
+                          , tasty-discover
+                          , fei-base >= 2.0.0
+                          , fei-nn >= 2.0.0
+                          , fei-modelzoo >= 2.0.0
+  default-language:         Haskell2010
