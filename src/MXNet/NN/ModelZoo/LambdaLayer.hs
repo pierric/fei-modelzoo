@@ -7,10 +7,11 @@ import           RIO
 
 import           Fei.Einops
 import           MXNet.Base
+import           MXNet.NN.Initializer
 import           MXNet.NN.Layer
 
 -- | The LambdaNetworks' layer
-lambdaLayer :: forall a . NumericDType a
+lambdaLayer :: forall a . (FloatDType a, InEnum (DTypeName a) BasicFloatDTypes)
             => Int -- ^ output dimension
             -> Int -- ^ key dimension
             -> Int -- ^ intra-depth dimension
@@ -36,6 +37,7 @@ lambdaLayer dim_out dim_k dim_u heads window x
       υc <- einsum "b h k n, b k v -> b h v n" [_q, λc] False
 
       rel_pos_emb <- parameter "rel_pos_emb" ReqWrite (Just [2 * window - 1, 2 * window - 1, dim_k, dim_u])
+                     >>= initWith (InitNormal 1.0)
       rel_pos     <- calcRelPos @a window
       rel_pos_lku <- gather rel_pos_emb rel_pos
 
@@ -47,10 +49,10 @@ lambdaLayer dim_out dim_k dim_u heads window x
       reshapeLike _υ (Just (-1)) Nothing x (Just (-2)) Nothing
 
 -- | Calculate the relative distance of every pair of points on a grid of size 'n', (2, n*n, n*n)
-calcRelPos :: forall a t . (HasCallStack, PrimTensorOp t, MXTensor t, NumericDType a)
+calcRelPos :: forall a t . (HasCallStack, PrimTensorOp t, MXTensor t, FloatDType a, InEnum (DTypeName a) BasicFloatDTypes)
            => Int -> TensorMonad t (t a)
 calcRelPos n = do
-    r <- arange Proxy 0 (Just $ fromIntegral n) Nothing
+    r <- arangeF Proxy 0 (Just $ fromIntegral n) Nothing
     grid_x <- expandDims 1 r >>= broadcastAxis [1] [n]
     grid_y <- expandDims 0 r >>= broadcastAxis [0] [n]
     mesh   <- stack 0 [grid_x, grid_y]
